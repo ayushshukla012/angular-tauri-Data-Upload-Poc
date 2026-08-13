@@ -1,0 +1,87 @@
+# Path-scoped so this only runs when transformation-service itself, or one of the two genuinely
+# shared modules (common-library, protos), actually changed — see
+# docs/architecture-deep-dive.md §4 for why those two are the only shared paths
+# that need to appear here alongside the service's own.
+
+transformation-service:build-test:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    key: maven-repo
+    paths:
+      - .m2/repository
+  script:
+    - mvn $MAVEN_CLI_OPTS -pl transformation-service -am install
+  artifacts:
+    paths:
+      - transformation-service/target/*.jar
+    expire_in: 1 day
+  rules:
+    - changes:
+        - transformation-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+transformation-service:docker:
+  stage: docker
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs:
+    - job: transformation-service:build-test
+      optional: true
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -f transformation-service/Dockerfile -t "$CI_REGISTRY_IMAGE/transformation-service:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/transformation-service:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - transformation-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+transformation-service:deploy-dev:
+  stage: deploy
+  image: alpine/helm:3.15.0
+  needs:
+    - job: transformation-service:docker
+      optional: true
+  environment:
+    name: dev/transformation-service
+  script:
+    - helm upgrade --install transformation-service helm/transformation-service
+        --namespace platform-dev --create-namespace
+        --set image.repository="$CI_REGISTRY_IMAGE/transformation-service"
+        --set image.tag="$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - transformation-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+transformation-service:deploy-prod:
+  stage: deploy
+  image: alpine/helm:3.15.0
+  needs:
+    - job: transformation-service:docker
+      optional: true
+  environment:
+    name: prod/transformation-service
+  when: manual
+  script:
+    - helm upgrade --install transformation-service helm/transformation-service
+        --namespace platform-prod
+        --set image.repository="$CI_REGISTRY_IMAGE/transformation-service"
+        --set image.tag="$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - transformation-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml

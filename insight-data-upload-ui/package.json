@@ -1,0 +1,39 @@
+{
+  "name": "insight-data-upload-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Data Upload Utility frontend for the Insight platform.",
+  "scripts": {
+    "start": "ng serve --host 0.0.0.0 --port 4200",
+    "build": "ng build",
+    "watch": "ng build --watch --configuration development",
+    "test": "ng test",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@angular/animations": "^22.0.8",
+    "@angular/common": "^22.0.8",
+    "@angular/compiler": "^22.0.8",
+    "@angular/core": "^22.0.8",
+    "@angular/forms": "^22.0.8",
+    "@angular/platform-browser": "^22.0.8",
+    "@angular/platform-browser-dynamic": "^22.0.8",
+    "@angular/router": "^22.0.8",
+    "@tauri-apps/api": "^2.11.1",
+    "rxjs": "^7.8.2",
+    "tslib": "^2.8.1",
+    "zone.js": "~0.15.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^22.0.8",
+    "@angular/cli": "^22.0.8",
+    "@angular/compiler-cli": "^22.0.8",
+    "@tauri-apps/cli": "^2.7.0",
+    "typescript": "~6.0.0"
+  },
+  "engines": {
+    "node": ">=22.22.3"
+  }
+}

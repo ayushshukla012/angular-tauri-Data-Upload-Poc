@@ -1,0 +1,52 @@
+server:
+  port: 8081
+
+grpc:
+  server:
+    port: 9095
+
+spring:
+  application:
+    name: upload-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/upload?options=-c%20TimeZone=UTC
+    username: postgres
+    password: postgres
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: localhost:9092
+  threads:
+    virtual:
+      enabled: true
+
+insight:
+  storage:
+    endpoint: http://localhost:9000
+    region: us-east-1
+    bucket: insight-uploads
+    access-key: minioadmin
+    secret-key: minioadmin
+    path-style-access: true
+    # Lowered from the 100MB code default so multipart mode is easy to exercise locally
+    # with a modest test file — see docs/resumable-uploads.md.
+    multipart-threshold-bytes: 10485760   # 10MB
+    default-part-size-bytes: 5242880      # 5MB (S3/MinIO's own minimum part size)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+      cors:
+        # Actuator endpoints are served by their own handler mapping, which does NOT consult
+        # WebConfig's WebMvcConfigurer#addCorsMappings (that only covers @RestController
+        # routes) — hence this separate, actuator-specific CORS config. Needed so insight-ui's
+        # ConnectivityService can poll /actuator/health directly from the browser to detect
+        # "network up but backend unreachable," a case navigator.onLine alone misses.
+        allowed-origins: http://localhost:4200, http://tauri.localhost
+        allowed-methods: GET

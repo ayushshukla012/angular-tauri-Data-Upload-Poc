@@ -1,0 +1,40 @@
+server:
+  port: 8082
+
+grpc:
+  server:
+    port: 9091
+
+spring:
+  application:
+    name: transformation-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/transformation
+    username: transformation
+    password: transformation
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: localhost:9092
+  threads:
+    virtual:
+      enabled: true
+
+insight:
+  storage:
+    endpoint: http://localhost:9000
+    region: us-east-1
+    bucket: insight-uploads
+    access-key: minioadmin
+    secret-key: minioadmin
+    path-style-access: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus

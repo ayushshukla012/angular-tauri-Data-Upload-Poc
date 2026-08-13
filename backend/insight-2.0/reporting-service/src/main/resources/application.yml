@@ -1,0 +1,35 @@
+server:
+  port: 8085
+
+grpc:
+  server:
+    port: 9093
+  client:
+    transformation-service:
+      address: static://localhost:9091
+      negotiation-type: plaintext
+    ocr-service:
+      address: static://localhost:9096
+      negotiation-type: plaintext
+
+spring:
+  application:
+    name: reporting-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/reporting
+    username: reporting
+    password: reporting
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: localhost:9092
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus

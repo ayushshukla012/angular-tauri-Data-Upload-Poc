@@ -1,0 +1,18 @@
+[package]
+name = "insight-data-upload-ui"
+version = "0.1.0"
+description = "Insight Data Uploads Utility"
+authors = ["Insight"]
+edition = "2021"
+license = "Proprietary"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rfd = "0.17.2"
+tauri = { version = "2", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

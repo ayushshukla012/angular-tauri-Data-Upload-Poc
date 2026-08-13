@@ -1,0 +1,24 @@
+# Runs whenever ANY service or shared module changes — ArchUnit checks layering
+# rules across all 5 services' compiled classes at once (see architecture-tests/),
+# so it can't be scoped to a single service's path the way the per-service jobs are.
+
+architecture-tests:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    key: maven-repo
+    paths:
+      - .m2/repository
+  script:
+    - mvn $MAVEN_CLI_OPTS -pl architecture-tests -am test
+  rules:
+    - changes:
+        - common-library/**
+        - protos/**
+        - upload-service/**
+        - transformation-service/**
+        - ocr-service/**
+        - orchestrator-service/**
+        - reporting-service/**
+        - architecture-tests/**
+        - pom.xml

@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package insight.upload.v1;
+
+option java_package = "com.insight.protos.upload.v1";
+option java_multiple_files = true;
+
+service UploadQueryService {
+  rpc GetUploadStatus (GetUploadStatusRequest) returns (GetUploadStatusResponse);
+}
+
+message GetUploadStatusRequest {
+  string upload_id = 1;
+}
+
+message GetUploadStatusResponse {
+  string upload_id = 1;
+  string status = 2; // RECEIVED | VALIDATING | PROCESSING | COMPLETED | FAILED
+}

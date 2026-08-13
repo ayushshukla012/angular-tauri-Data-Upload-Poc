@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package insight.common.v1;
+
+option java_package = "com.insight.protos.common.v1";
+option java_multiple_files = true;
+
+message Empty {}
+
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+}

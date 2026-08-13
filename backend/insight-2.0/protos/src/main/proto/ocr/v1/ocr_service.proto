@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package insight.ocr.v1;
+
+option java_package = "com.insight.protos.ocr.v1";
+option java_multiple_files = true;
+
+import "transformation/v1/transformation_service.proto";
+
+service OcrService {
+  rpc StartExtraction (StartExtractionRequest) returns (StartExtractionResponse);
+  rpc GetExtractionResult (GetExtractionResultRequest) returns (GetExtractionResultResponse);
+}
+
+message StartExtractionRequest {
+  string saga_id = 1;
+  string upload_id = 2;
+  repeated string document_references = 3;
+}
+
+message StartExtractionResponse {
+  insight.transformation.v1.DispatchStatus status = 1;
+  string reason = 2;
+}
+
+message GetExtractionResultRequest {
+  string upload_id = 1;
+}
+
+message GetExtractionResultResponse {
+  string status = 1; // IN_PROGRESS | COMPLETED | FAILED
+  int32 document_count = 2;
+  int32 extracted_count = 3;
+}

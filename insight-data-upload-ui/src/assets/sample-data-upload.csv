@@ -1,0 +1,5 @@
+Sr. No.,PAN,Name,DOB/DOI,Mobile,E-Mail,PIN Code,Address,State,Verification Status,Information FY,Information Source Type,Information Type,Information Value,Actionable AY,Verification Result Type
+00001,XZQWE9876J,Neha Sharma,15/03/1985,9876543210,neha.sharma@example.in,400050,"Bandra West, Mumbai",Maharashtra,Completed,2025-26,Digital,Financial Information,125000,2026-27,Income Escaping Assessment
+00002,LMNOP4321K,Ravi Kumar,08/11/1990,9876543211,ravi.kumar@example.in,560034,"Koramangala, Bangalore",Karnataka,Completed,2025-26,Portal,Banking Information,84000,2026-27,Further Verification Required
+00003,QWERT5678L,Sonal Mehta,29/07/1982,9876543212,sonal.mehta@example.in,700064,"Salt Lake, Kolkata",West Bengal,Pending,2024-25,Third Party,Property Information,2400000,2025-26,No Income Escaping
+00004,ZXCVB1234M,Karan Singh,12/01/1978,9876543213,karan.singh@example.in,110001,"Connaught Place, Delhi",Delhi,Completed,2025-26,Digital,Transaction Information,975000,2026-27,Income Escaping Assessment

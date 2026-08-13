@@ -1,0 +1,40 @@
+server:
+  port: 8084
+
+grpc:
+  server:
+    port: 9094
+  client:
+    transformation-service:
+      address: static://localhost:9091
+      negotiation-type: plaintext
+    ocr-service:
+      address: static://localhost:9096
+      negotiation-type: plaintext
+    reporting-service:
+      address: static://localhost:9093
+      negotiation-type: plaintext
+
+spring:
+  application:
+    name: orchestrator-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/orchestrator
+    username: orchestrator
+    password: orchestrator
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: orchestrator-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus

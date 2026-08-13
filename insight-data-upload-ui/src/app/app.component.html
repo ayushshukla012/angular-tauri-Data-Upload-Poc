@@ -1,0 +1,339 @@
+<div class="app-shell">
+  <div class="gov-bar">
+    <div class="gov-left"><span class="flag">🇮🇳</span><span>Government of India</span><span class="external">↗</span></div>
+    <div class="gov-tools">
+      <button type="button">Skip to Main Content</button>
+      <button type="button">A−</button><button type="button" aria-label="Accessibility">▧</button><button type="button">A+</button>
+      <span class="divider"></span><span>☼</span><span>English⌄</span>
+    </div>
+  </div>
+
+  <header class="brand-header">
+    <button class="brand" type="button" (click)="goHome()" aria-label="Go to home">
+      <span class="brand-mark" aria-hidden="true">
+        <span class="node n1"></span><span class="node n2"></span><span class="node n3"></span><span class="node n4"></span>
+        <span class="edge e1"></span><span class="edge e2"></span><span class="edge e3"></span><span class="edge e4"></span>
+      </span>
+      <span class="brand-copy"><strong>Data Uploads Utility</strong><small>Government of India</small></span>
+    </button>
+    <div class="header-links">
+      <button type="button" (click)="openExisting()">Open <span class="plus">＋</span></button>
+      <button type="button" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">Help ⓘ</button>
+    </div>
+  </header>
+
+  <div class="offline-banner" *ngIf="!isOnline()">
+    <span>⚠</span> Backend connection is unavailable. Local draft saving remains available.
+  </div>
+
+  @if (step() > 0) {
+    <div class="stepper" aria-label="Application progress">
+      <div [class.done]="step() > 1" [class.active]="step() === 1" class="step-item">
+        <span class="step-circle">{{ step() > 1 ? '✓' : '1' }}</span><span>Packet Details</span>
+      </div>
+      <div class="step-line" [class.done]="step() > 1"></div>
+      <div [class.done]="step() > 2" [class.active]="step() === 2" class="step-item">
+        <span class="step-circle">{{ step() > 2 ? '✓' : '2' }}</span><span>Person &amp; Verification Details</span>
+      </div>
+      <div class="step-line" [class.done]="step() > 2"></div>
+      <div [class.active]="step() === 3" class="step-item">
+        <span class="step-circle">3</span><span>Create Packet</span>
+      </div>
+    </div>
+  }
+
+  @if (step() === 0) {
+    <main class="landing">
+      <section class="welcome-panel">
+        <div class="welcome-copy">
+          <h1>Data Uploads Utility</h1>
+          <p class="welcome-question">Need to submit case-related information?</p>
+          <p>Create a new packet to record person details, information findings, verification results, and supporting documents. You can save your progress, validate the information, and generate a secure package when ready.</p>
+        </div>
+        <div class="landing-actions">
+          <button class="choice-card" type="button" (click)="startNew()">
+            <span class="choice-icon">＋</span>
+            <span><strong>New Application</strong><small>Create a new packet, add person details and information records, then generate a submission package.</small><em>Get Started <span>›</span></em></span>
+          </button>
+          <button class="choice-card" type="button" (click)="openExisting()">
+            <span class="choice-icon file">▣</span>
+            <span><strong>Open Existing File</strong><small>Import a previously saved draft from your local system to continue your work.</small><em>Open File <span>›</span></em></span>
+          </button>
+          <button class="instructions-link" type="button" (click)="downloadSampleCsv()">View Instructions <span>›</span></button>
+        </div>
+      </section>
+    </main>
+  } @else if (step() === 1) {
+    <main class="content-wrap">
+      <section class="panel packet-panel">
+        <div class="panel-heading">
+          <div><h1>Packet Details</h1><p>Capture case packet information before adding information records and documents.</p></div>
+          <button class="outline small" type="button" (click)="packetForm.reset()">Edit</button>
+        </div>
+        <div class="mandatory-note">ⓘ All mandatory fields marked with <b>*</b> must be completed before proceeding.</div>
+
+        <div class="section-title">Report Details</div>
+        <div class="form-grid one">
+          <label>Report Type <span>*</span><select [formControl]="packetForm.controls.reportType"><option value="">Select type</option><option *ngFor="let t of reportTypes" [value]="t">{{t}}</option></select></label>
+        </div>
+
+        <div class="section-title">Basic Details</div>
+        <div class="form-grid">
+          <label>Reference Number/File Number <span>*</span><input [formControl]="packetForm.controls.referenceNumber" placeholder="Enter number"></label>
+          <label class="wide">Description of Information <span>*</span><textarea maxlength="2000" [formControl]="packetForm.controls.description" placeholder="Enter description"></textarea><small class="counter">{{packetForm.controls.description.value?.length || 0}}/2000</small></label>
+        </div>
+
+        <div class="section-title">Submitting Person Details</div>
+        <div class="form-grid three">
+          <label>Name <span>*</span><input [formControl]="packetForm.controls.submittingPersonName" placeholder="Enter name"></label>
+          <label>Mobile Number <span>*</span><input inputmode="numeric" maxlength="10" [formControl]="packetForm.controls.submittingPersonMobile" placeholder="Enter mobile number"></label>
+          <label>Email <span>*</span><input [formControl]="packetForm.controls.submittingPersonEmail" placeholder="Enter email"></label>
+          <label>Address <span>*</span><input [formControl]="packetForm.controls.submittingPersonAddress" placeholder="Enter address"></label>
+        </div>
+
+        <div class="footer-actions">
+          <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
+          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" (click)="nextFromPacket()">Next</button></div>
+        </div>
+      </section>
+    </main>
+  } @else if (step() === 2) {
+    <main class="content-wrap">
+      <section class="panel people-panel">
+        <div class="panel-heading">
+          <div><div class="title-line"><h1>Person &amp; Verification Details</h1><span class="reference-chip">Reference Number/File Number : {{packetForm.controls.referenceNumber.value || '—'}}</span></div><p>Manage Information Records, General Documents, CSV Operations and Evidence Tracking in one place.</p></div>
+          <div class="search-box"><input placeholder="Search" [value]="filter()" (input)="setFilter($any($event.target).value)"><span>⌕</span></div>
+        </div>
+        <div class="mandatory-note">ⓘ All mandatory fields marked with <b>*</b> must be completed before proceeding.</div>
+
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <button class="outline" type="button" (click)="openGeneralDocument()">▧ General Document</button>
+            <button class="outline" type="button" [disabled]="selectedRows().size === 0" (click)="deleteSelected()">▢ Delete</button>
+            <button class="outline" type="button" (click)="validateRows()">◉ Validate</button>
+          </div>
+          <div class="toolbar-right">
+            <button class="outline" type="button" (click)="exportCsv()">⇩ Export CSV</button>
+            <button class="primary" type="button" (click)="openAddRow()">＋ Add Row</button>
+            <button class="primary" type="button" (click)="openCsvModal()">⇧ Import CSV</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="check-col"><input type="checkbox" [checked]="allVisibleSelected()" (change)="toggleAllVisible($any($event.target).checked)"></th>
+                <th>Sr.<br>No. <span>▽</span></th><th>PAN <span>▽</span></th><th>Name <span>▽</span></th><th>DOB/DOI <span>▽</span></th><th>Address <span>▽</span></th><th>State <span>▽</span></th><th>Pin<br>Code <span>▽</span></th><th>E-Mail <span>▽</span></th><th>Docs <span>▽</span></th><th>Verification<br>Status <span>▽</span></th><th class="action-col"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let row of pagedRows; let i = index">
+                <td><input type="checkbox" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
+                <td>{{row.serialNo}}</td><td class="mono">{{row.pan}}</td><td>{{row.name}}</td><td>{{row.dobDoi}}</td><td>{{row.address}}</td><td>{{row.state}}</td><td>{{row.pinCode}}</td><td class="truncate" [title]="row.email">{{row.email}}</td><td>{{documents().filter(d => d.rowCaseIds.includes(row.caseId)).length}}</td>
+                <td><span class="status-chip" [class.completed]="row.verificationStatus === 'Completed'"><span class="dot"></span>{{row.verificationStatus === 'Completed' ? 'Completed' : 'Pending'}}</span></td>
+                <td><button class="kebab" type="button" (click)="editRow(rows().indexOf(row))">⌄</button></td>
+              </tr>
+              <tr *ngIf="pagedRows.length === 0"><td colspan="12" class="empty">No records found. Add a row or import a CSV.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="documents-summary" *ngIf="documents().length">
+          <div><strong>General documents</strong><span>{{documents().length}} attached document(s)</span></div>
+          <button class="link-button" type="button" (click)="openGeneralDocument()">Manage documents</button>
+        </div>
+
+        <div class="pagination">
+          <button type="button" [disabled]="page() === 1" (click)="setPage(page() - 1)">‹</button>
+          <button type="button" *ngFor="let p of [].constructor(pageCount); let i = index" [class.active-page]="page() === i + 1" (click)="setPage(i + 1)">{{i + 1}}</button>
+          <button type="button" [disabled]="page() === pageCount" (click)="setPage(page() + 1)">›</button>
+          <span>Showing {{pagedRows.length}} of {{filteredRows.length}} items</span>
+          <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option value="10">10</option><option value="25">25</option><option value="50">50</option></select>
+        </div>
+
+        <div class="footer-actions">
+          <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
+          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="!rows().length" (click)="nextToCreate()">Next</button></div>
+        </div>
+      </section>
+    </main>
+  } @else if (step() === 3) {
+    <main class="content-wrap">
+      <section class="panel create-panel">
+        <div class="panel-heading"><div><h1>Create Packet</h1><p>Review the packet and submit the prepared case records and supporting documents.</p></div></div>
+        <div class="review-grid">
+          <div class="review-card"><span>Report Type</span><strong>{{packet.reportType}}</strong></div>
+          <div class="review-card"><span>Reference Number</span><strong>{{packet.referenceNumber}}</strong></div>
+          <div class="review-card"><span>Submitting Person</span><strong>{{packet.submittingPersonName}}</strong></div>
+          <div class="review-card"><span>Records</span><strong>{{rows().length}}</strong></div>
+          <div class="review-card"><span>Documents</span><strong>{{documents().length}}</strong></div>
+          <div class="review-card"><span>Backend designation</span><strong>{{environmentLabel}}</strong></div>
+        </div>
+        <div class="submit-note"><span>✓</span><div><strong>Ready to submit</strong><p>Packet metadata is sent to <code>/api/v1/packets</code>, cases to <code>/api/v1/cases</code>, and supporting files use the presigned MinIO upload flow.</p></div></div>
+        <div class="progress-box" *ngIf="progressMessage()"><span class="spinner" *ngIf="finalSubmitBusy()"></span>{{progressMessage()}}</div>
+        <div class="footer-actions">
+          <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
+          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="finalSubmitBusy()" (click)="createPacket()">{{finalSubmitBusy() ? 'Creating…' : 'Create Packet'}}</button></div>
+        </div>
+      </section>
+    </main>
+  }
+
+  <footer class="footer"><span>© 2026 · Copyright Insight. All rights reserved. Powered by CBDT | Government of India</span><span><a>Terms &amp; Conditions</a><a>Privacy Policy</a></span></footer>
+
+  <!-- Add Row modal -->
+  <div class="modal-backdrop" *ngIf="modal() === 'addRow'" (click)="$event.target === $event.currentTarget && closeModal()">
+    <section class="modal xlarge" role="dialog" aria-modal="true" aria-label="Add Row">
+      <div class="modal-header"><h2>Add Row</h2><button type="button" (click)="closeModal()">×</button></div>
+      <div class="modal-body scroll">
+        <div class="accordion-section">
+          <button class="accordion-heading" type="button" (click)="personOpen.set(!personOpen())"><span>Person Details</span><span>{{personOpen() ? '⌃' : '⌄'}}</span></button>
+          <div *ngIf="personOpen()" class="accordion-content">
+            <div class="form-grid two">
+              <label>PAN <span>*</span>
+                <input maxlength="10" [formControl]="rowForm.controls.pan" placeholder="e.g. ABCDE1234F" [class.invalid]="rowForm.controls.pan.touched && rowForm.controls.pan.invalid">
+                <small class="field-error" *ngIf="rowForm.controls.pan.touched && rowForm.controls.pan.hasError('pattern')">Format: 5 letters, 4 numbers, 1 letter (e.g. ABCDE1234F)</small>
+              </label>
+              <label>Name <span>*</span>
+                <input [formControl]="rowForm.controls.name" placeholder="Enter name" [class.invalid]="rowForm.controls.name.touched && rowForm.controls.name.invalid">
+              </label>
+              <label>DOB/DOI <span>*</span>
+                <input type="text" [formControl]="rowForm.controls.dobDoi" placeholder="DD/MM/YYYY" [class.invalid]="rowForm.controls.dobDoi.touched && rowForm.controls.dobDoi.invalid">
+              </label>
+              <label>Mobile <span>*</span>
+                <div class="mobile-control">
+                  <span>+91⌄</span>
+                  <input maxlength="10" [formControl]="rowForm.controls.mobile" placeholder="Enter mobile number" [class.invalid]="rowForm.controls.mobile.touched && rowForm.controls.mobile.invalid">
+                </div>
+                <small class="field-error" *ngIf="rowForm.controls.mobile.touched && rowForm.controls.mobile.hasError('pattern')">Must be 10 digits</small>
+              </label>
+              <label>E-mail <span>*</span>
+                <input [formControl]="rowForm.controls.email" placeholder="Enter email" [class.invalid]="rowForm.controls.email.touched && rowForm.controls.email.invalid">
+                <small class="field-error" *ngIf="rowForm.controls.email.touched && rowForm.controls.email.hasError('email')">Invalid email address</small>
+              </label>
+              <label>PIN Code <span>*</span>
+                <input maxlength="6" [formControl]="rowForm.controls.pinCode" placeholder="Enter PIN Code" [class.invalid]="rowForm.controls.pinCode.touched && rowForm.controls.pinCode.invalid">
+                <small class="field-error" *ngIf="rowForm.controls.pinCode.touched && rowForm.controls.pinCode.hasError('pattern')">Must be 6 digits</small>
+              </label>
+              <label class="wide">Address <span>*</span>
+                <input [formControl]="rowForm.controls.address" placeholder="Enter address detail" [class.invalid]="rowForm.controls.address.touched && rowForm.controls.address.invalid">
+              </label>
+              <label class="wide">State <span>*</span>
+                <select [formControl]="rowForm.controls.state" [class.invalid]="rowForm.controls.state.touched && rowForm.controls.state.invalid">
+                  <option value="">Select state</option>
+                  <option *ngFor="let s of states" [value]="s">{{s}}</option>
+                </select>
+              </label>
+            </div>
+            <div class="radio-line"><span>Verification Status <b>*</b></span><label><input type="radio" value="Pending" [formControl]="rowForm.controls.verificationStatus"> Pending</label><label><input type="radio" value="Completed" [formControl]="rowForm.controls.verificationStatus"> Completed</label></div>
+            <div class="modal-row-actions"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" (click)="saveRow()">Save</button></div>
+          </div>
+        </div>
+
+        <div class="accordion-section">
+          <button class="accordion-heading" type="button" (click)="infoOpen.set(!infoOpen())"><span>Information Details</span><span>{{infoOpen() ? '⌃' : '⌄'}}</span></button>
+          <div *ngIf="infoOpen()" class="accordion-content">
+            <div class="form-grid two">
+              <label>FY <span>*</span><select [formControl]="rowForm.controls.informationFy"><option value="">Select year</option><option *ngFor="let y of years" [value]="y">{{y}}</option></select></label>
+              <label>Information Type <span>*</span><select [formControl]="rowForm.controls.informationType"><option value="">Select information type</option><option *ngFor="let t of informationTypes" [value]="t">{{t}}</option></select></label>
+              <label>Findings <span>*</span><select [formControl]="rowForm.controls.finding"><option value="">Select finding</option><option *ngFor="let f of findings" [value]="f">{{f}}</option></select></label>
+              <label>Source <span>*</span><select [formControl]="rowForm.controls.informationSourceType"><option value="">Select source</option><option *ngFor="let s of sourceTypes" [value]="s">{{s}}</option></select></label>
+              <label class="wide">Value <span>*</span><input [formControl]="rowForm.controls.informationValue" placeholder="Enter value"></label>
+              <label class="wide">Description <input [formControl]="rowForm.controls.informationDescription" placeholder="Enter description"></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="accordion-section">
+          <button class="accordion-heading" type="button" (click)="verificationOpen.set(!verificationOpen())"><span>Verification Details</span><span>{{verificationOpen() ? '⌃' : '⌄'}}</span></button>
+          <div *ngIf="verificationOpen()" class="accordion-content">
+            <div class="form-grid two">
+              <label>Actionable AY <span>*</span><select [formControl]="rowForm.controls.actionableAy"><option value="">Select year</option><option *ngFor="let y of years" [value]="y">{{y}}</option></select></label>
+              <label>Verification Result Type <span>*</span><select [formControl]="rowForm.controls.verificationResultType"><option value="">Select verification result type</option><option *ngFor="let r of verificationResults" [value]="r">{{r}}</option></select></label>
+              <label>Statutory Reason <span>*</span><select [formControl]="rowForm.controls.statutoryReason"><option value="">Select verification result type</option><option *ngFor="let r of statutoryReasons" [value]="r">{{r}}</option></select></label>
+              <label>Income Escaping Assessment Value <span>*</span><input [formControl]="rowForm.controls.incomeEscapingAssessmentValue" placeholder="Enter value"></label>
+              <label class="wide">Information Value <span>*</span><input [formControl]="rowForm.controls.verificationInformationValue" placeholder="Enter value"></label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer"><button class="primary" type="button" (click)="saveRow()">Add Row</button></div>
+    </section>
+  </div>
+
+  <!-- CSV modal -->
+  <div class="modal-backdrop" *ngIf="modal() === 'csv'" (click)="$event.target === $event.currentTarget && closeModal()">
+    <section class="modal medium" role="dialog" aria-modal="true">
+      <div class="modal-header"><h2>Import CSV</h2><button type="button" (click)="closeModal()">×</button></div>
+      <div class="modal-body center-drop" (dragover)="onDragOver($event)" (drop)="handleCsvDrop($event)">
+        <input #csvFileInput id="csvFileInput" type="file" accept=".csv,text/csv" class="visually-hidden" (change)="handleCsvSelection($event)">
+        <div class="upload-picker" role="button" tabindex="0" (click)="csvFileInput.click()" (keydown.enter)="csvFileInput.click()" (keydown.space)="$event.preventDefault(); csvFileInput.click()">
+          <div class="upload-icon">☁</div>
+          <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
+          <small>Maximum allowed file size: 25 MB.</small>
+        </div>
+        <div *ngIf="csvFile()" class="file-pill">
+          <span>✓</span>{{csvFile()?.name}}
+          <button type="button" (click)="csvFile.set(null)">✕</button>
+        </div>
+        <button class="sample-link" type="button" (click)="downloadSampleCsv()">Download sample CSV</button>
+      </div>
+      <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" [disabled]="importBusy()" (click)="importCsv()">{{importBusy() ? 'Importing…' : 'Save'}}</button></div>
+    </section>
+  </div>
+
+  <!-- General document modal -->
+  <div class="modal-backdrop" *ngIf="modal() === 'generalDoc'" (click)="$event.target === $event.currentTarget && closeModal()">
+    <section class="modal large" role="dialog" aria-modal="true">
+      <div class="modal-header"><h2>General Document</h2><button type="button" (click)="closeModal()">×</button></div>
+      <div class="modal-body">
+        <div class="form-grid two">
+          <label>Document Type <span>*</span><select [value]="documentType()" (change)="documentType.set($any($event.target).value)"><option>Verification Type</option><option>Evidence</option><option>Supporting Document</option><option>Other</option></select></label>
+          <label>Description <span>*</span><input [value]="documentDescription()" (input)="documentDescription.set($any($event.target).value)" placeholder="Enter description"></label>
+        </div>
+        <input #docFileInput id="docFileInput" type="file" class="visually-hidden" (change)="handleDocumentSelection($event)">
+        <div class="drop-area upload-picker" role="button" tabindex="0" (click)="browseForDocument(docFileInput)" (keydown.enter)="browseForDocument(docFileInput)" (keydown.space)="$event.preventDefault(); browseForDocument(docFileInput)" (dragover)="onDragOver($event)" (drop)="handleDocumentDrop($event)">
+          <div class="upload-icon">☁</div>
+          <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
+          <small>Maximum allowed file size: 25 MB.</small>
+        </div>
+        <div *ngIf="generalDocumentFile()" class="file-pill"><span>✓</span>{{generalDocumentFile()?.name}}<button type="button" (click)="generalDocumentFile.set(null)">✕</button></div>
+        <div class="attach-choice"><label><input type="radio" [checked]="attachedForAll()" (change)="attachedForAll.set(true)"> All Rows</label><label><input type="radio" [checked]="!attachedForAll()" [disabled]="selectedRows().size === 0" (change)="attachedForAll.set(false)"> Selected Rows ({{selectedRows().size}})</label></div>
+        <div class="doc-preview" *ngIf="documents().length">
+          <table><thead><tr><th>Sr. No.</th><th>Document Name</th><th>Document Type</th><th>Description</th><th>Document attached for</th><th></th></tr></thead><tbody><tr *ngFor="let doc of documents(); let i = index"><td>{{i+1}}</td><td class="link-text">{{doc.fileName}}</td><td>{{doc.docType}}</td><td>{{doc.description}}</td><td>{{doc.attachedFor}}</td><td><button type="button" class="icon-btn" (click)="editDocument(doc)">✎</button><button type="button" class="icon-btn danger" (click)="removeDocument(doc.id)">▥</button></td></tr></tbody></table>
+        </div>
+      </div>
+      <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" (click)="saveGeneralDocument()">Save</button></div>
+    </section>
+  </div>
+
+  <!-- Open existing modal -->
+  <div class="modal-backdrop" *ngIf="modal() === 'openFile'" (click)="$event.target === $event.currentTarget && closeModal()">
+    <section class="modal medium" role="dialog" aria-modal="true">
+      <div class="modal-header"><h2>Open Existing File</h2><button type="button" (click)="closeModal()">×</button></div>
+      <div class="modal-body center-drop" (dragover)="onDragOver($event)" (drop)="handleDraftDrop($event)">
+        <input #draftFileInput id="draftFileInput" type="file" class="visually-hidden" accept="application/json,.json" (change)="handleDraftFile($event)">
+        <div class="open-card upload-picker" role="button" tabindex="0" (click)="draftFileInput.click()" (keydown.enter)="draftFileInput.click()" (keydown.space)="$event.preventDefault(); draftFileInput.click()">
+          <div class="upload-icon">▣</div>
+          <strong>Select a saved draft JSON file</strong>
+          <p>Continue where you left off. Draft metadata is stored locally; documents remain on the current device unless reattached.</p>
+          <span class="browse-button">Browse</span>
+        </div>
+        <button class="link-button" type="button" (click)="loadDraftFromBrowser()">Restore last local draft</button>
+      </div>
+      <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button></div>
+    </section>
+  </div>
+
+  <!-- Success modal -->
+  <div class="modal-backdrop" *ngIf="modal() === 'saveSuccess'">
+    <section class="modal small success-modal" role="dialog" aria-modal="true">
+      <div class="success-icon">✓</div><h2>Packet Created Successfully</h2><p>{{rows().length}} case record(s) and {{documents().length}} document record(s) were submitted.</p><button class="primary" type="button" (click)="goHome()">Close</button>
+    </section>
+  </div>
+
+  <div class="toast-stack">
+    <div *ngFor="let t of toast.toasts()" class="toast" [class.success]="t.kind === 'success'" [class.error]="t.kind === 'error'" [class.info]="t.kind === 'info'"><span>{{t.kind === 'success' ? '✓' : t.kind === 'error' ? '!' : 'i'}}</span><div>{{t.message}}</div><button type="button" (click)="toast.remove(t.id)">×</button></div>
+  </div>
+</div>

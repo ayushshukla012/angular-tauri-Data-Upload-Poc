@@ -1,0 +1,87 @@
+# Path-scoped so this only runs when reporting-service itself, or one of the two genuinely
+# shared modules (common-library, protos), actually changed — see
+# docs/architecture-deep-dive.md §4 for why those two are the only shared paths
+# that need to appear here alongside the service's own.
+
+reporting-service:build-test:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    key: maven-repo
+    paths:
+      - .m2/repository
+  script:
+    - mvn $MAVEN_CLI_OPTS -pl reporting-service -am install
+  artifacts:
+    paths:
+      - reporting-service/target/*.jar
+    expire_in: 1 day
+  rules:
+    - changes:
+        - reporting-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+reporting-service:docker:
+  stage: docker
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs:
+    - job: reporting-service:build-test
+      optional: true
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -f reporting-service/Dockerfile -t "$CI_REGISTRY_IMAGE/reporting-service:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/reporting-service:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - reporting-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+reporting-service:deploy-dev:
+  stage: deploy
+  image: alpine/helm:3.15.0
+  needs:
+    - job: reporting-service:docker
+      optional: true
+  environment:
+    name: dev/reporting-service
+  script:
+    - helm upgrade --install reporting-service helm/reporting-service
+        --namespace platform-dev --create-namespace
+        --set image.repository="$CI_REGISTRY_IMAGE/reporting-service"
+        --set image.tag="$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - reporting-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+reporting-service:deploy-prod:
+  stage: deploy
+  image: alpine/helm:3.15.0
+  needs:
+    - job: reporting-service:docker
+      optional: true
+  environment:
+    name: prod/reporting-service
+  when: manual
+  script:
+    - helm upgrade --install reporting-service helm/reporting-service
+        --namespace platform-prod
+        --set image.repository="$CI_REGISTRY_IMAGE/reporting-service"
+        --set image.tag="$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - reporting-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml

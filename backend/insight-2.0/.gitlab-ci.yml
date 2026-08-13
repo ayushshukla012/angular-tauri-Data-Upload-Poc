@@ -1,0 +1,24 @@
+# The only CI config file GitLab actually reads — GitLab does not auto-discover
+# .gitlab-ci.yml files placed inside individual module folders. Per-service job
+# definitions are split out under .gitlab/ci/ purely for readability and pulled in
+# below via `include:`; from GitLab's perspective this is still one single pipeline.
+#
+# See docs/architecture-deep-dive.md §7 for why one Helm chart per service /
+# one CI job group per service mirrors the same "one module = one deployable" rule.
+
+stages:
+  - build
+  - docker
+  - deploy
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  MAVEN_CLI_OPTS: "-B -ntp"
+
+include:
+  - local: '.gitlab/ci/architecture-tests.yml'
+  - local: '.gitlab/ci/upload-service.yml'
+  - local: '.gitlab/ci/transformation-service.yml'
+  - local: '.gitlab/ci/ocr-service.yml'
+  - local: '.gitlab/ci/orchestrator-service.yml'
+  - local: '.gitlab/ci/reporting-service.yml'

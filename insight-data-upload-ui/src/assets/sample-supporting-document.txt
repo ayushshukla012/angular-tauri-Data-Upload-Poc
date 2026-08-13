@@ -1,0 +1,7 @@
+Insight Data Upload Utility - Sample Supporting Document
+
+Document Type: Verification Type
+Description: Sample supporting document for local POC testing.
+
+This file is intentionally synthetic and contains no real taxpayer information.
+Use it to exercise the General Document attachment flow and direct-to-MinIO upload path.

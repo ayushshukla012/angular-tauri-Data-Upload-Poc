@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package insight.orchestrator.v1;
+
+option java_package = "com.insight.protos.orchestrator.v1";
+option java_multiple_files = true;
+
+service OrchestratorQueryService {
+  rpc GetSagaStatus (GetSagaStatusRequest) returns (GetSagaStatusResponse);
+}
+
+message GetSagaStatusRequest {
+  string upload_id = 1;
+}
+
+message GetSagaStatusResponse {
+  string saga_id = 1;
+  string state = 2; // STARTED | VALIDATING | PROCESSING | EXTRACTED | COMPLETED | FAILED
+  string current_step = 3;
+}

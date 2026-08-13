@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package insight.transformation.v1;
+
+option java_package = "com.insight.protos.transformation.v1";
+option java_multiple_files = true;
+
+service TransformationService {
+  rpc StartTransformation (StartTransformationRequest) returns (StartTransformationResponse);
+  rpc GetTransformationResult (GetTransformationResultRequest) returns (GetTransformationResultResponse);
+}
+
+message StartTransformationRequest {
+  string saga_id = 1;
+  string upload_id = 2;
+  string file_reference = 3;
+  string file_type = 4; // CSV | EXCEL | JSON
+}
+
+message StartTransformationResponse {
+  DispatchStatus status = 1;
+  string reason = 2;
+}
+
+message GetTransformationResultRequest {
+  string upload_id = 1;
+}
+
+message GetTransformationResultResponse {
+  string status = 1; // IN_PROGRESS | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
+  int64 total_rows = 2;
+  int64 valid_rows = 3;
+  int64 error_rows = 4;
+  bool requires_ocr = 5;
+}
+
+enum DispatchStatus {
+  DISPATCH_STATUS_UNSPECIFIED = 0;
+  ACCEPTED = 1;
+  REJECTED = 2;
+  ALREADY_PROCESSED = 3;
+}

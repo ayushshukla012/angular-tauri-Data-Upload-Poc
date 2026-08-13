@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package insight.reporting.v1;
+
+option java_package = "com.insight.protos.reporting.v1";
+option java_multiple_files = true;
+
+service ReportingService {
+  rpc GenerateReport (GenerateReportRequest) returns (GenerateReportResponse);
+}
+
+message GenerateReportRequest {
+  string saga_id = 1;
+  string upload_id = 2;
+}
+
+message GenerateReportResponse {
+  string status = 1; // ACCEPTED | REJECTED
+}

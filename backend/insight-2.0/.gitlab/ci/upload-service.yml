@@ -1,0 +1,87 @@
+# Path-scoped so this only runs when upload-service itself, or one of the two genuinely
+# shared modules (common-library, protos), actually changed — see
+# docs/architecture-deep-dive.md §4 for why those two are the only shared paths
+# that need to appear here alongside the service's own.
+
+upload-service:build-test:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    key: maven-repo
+    paths:
+      - .m2/repository
+  script:
+    - mvn $MAVEN_CLI_OPTS -pl upload-service -am install
+  artifacts:
+    paths:
+      - upload-service/target/*.jar
+    expire_in: 1 day
+  rules:
+    - changes:
+        - upload-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+upload-service:docker:
+  stage: docker
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs:
+    - job: upload-service:build-test
+      optional: true
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -f upload-service/Dockerfile -t "$CI_REGISTRY_IMAGE/upload-service:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/upload-service:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - upload-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+upload-service:deploy-dev:
+  stage: deploy
+  image: alpine/helm:3.15.0
+  needs:
+    - job: upload-service:docker
+      optional: true
+  environment:
+    name: dev/upload-service
+  script:
+    - helm upgrade --install upload-service helm/upload-service
+        --namespace platform-dev --create-namespace
+        --set image.repository="$CI_REGISTRY_IMAGE/upload-service"
+        --set image.tag="$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - upload-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
+
+upload-service:deploy-prod:
+  stage: deploy
+  image: alpine/helm:3.15.0
+  needs:
+    - job: upload-service:docker
+      optional: true
+  environment:
+    name: prod/upload-service
+  when: manual
+  script:
+    - helm upgrade --install upload-service helm/upload-service
+        --namespace platform-prod
+        --set image.repository="$CI_REGISTRY_IMAGE/upload-service"
+        --set image.tag="$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - upload-service/**
+        - common-library/**
+        - protos/**
+        - pom.xml
