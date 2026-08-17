@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { invoke } from '@tauri-apps/api/core';
@@ -6,7 +6,31 @@ import { ApiService } from './services/api.service';
 import { DraftStoreService } from './services/draft-store.service';
 import { ToastService } from './services/toast.service';
 import { environment } from '../environments/environment';
-import { AttachedDocument, DraftState, InformationDetails, PacketDetails, PersonRow, VerificationDetails } from './models';
+import { AttachedDocument, DraftState, InformationDetails, LoadedDraftBundle, PacketDetails, PersonRow, SavedDraftSummary, VerificationDetails, VerificationStatus } from './models';
+
+interface NativePickedFile {
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  extension: string;
+  bytes: number[];
+}
+
+interface NativePickedDocument {
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  extension: string;
+}
+
+interface SelectedDocument {
+  file: File;
+  filePath?: string;
+  fileSize: number;
+}
+
+type ModalName = 'none' | 'addRow' | 'csv' | 'generalDoc' | 'openFile' | 'saveSuccess';
+type PaginationItem = number | '…';
 
 @Component({
   selector: 'idu-root',
@@ -21,27 +45,38 @@ export class AppComponent implements OnInit {
   readonly drafts = inject(DraftStoreService);
   readonly toast = inject(ToastService);
 
-  readonly step = signal(0); // 0 home, 1 packet, 2 people, 3 create
-  readonly modal = signal<'none' | 'addRow' | 'info' | 'verification' | 'csv' | 'generalDoc' | 'openFile' | 'saveSuccess'>('none');
+  readonly step = signal(0);
+  readonly modal = signal<ModalName>('none');
   readonly infoOpen = signal(false);
   readonly verificationOpen = signal(false);
   readonly personOpen = signal(true);
-  readonly infoModalOpen = signal(false);
-  readonly verificationModalOpen = signal(false);
   readonly isOnline = signal(true);
-  readonly busy = signal(false);
   readonly importBusy = signal(false);
   readonly finalSubmitBusy = signal(false);
   readonly currentRowIndex = signal<number | null>(null);
+  readonly currentDraftId = signal<string | null>(null);
   readonly selectedRows = signal<Set<string>>(new Set());
   readonly pageSize = signal(10);
   readonly page = signal(1);
   readonly filter = signal('');
   readonly lastSavedAt = signal<string | null>(null);
   readonly progressMessage = signal('');
+  readonly packetEditMode = signal(true);
   readonly documentType = signal('Verification Type');
   readonly documentDescription = signal('Found this digitally');
-  readonly attachedForAll = signal(true);
+  readonly attachedForAll = signal(false);
+  readonly csvFile = signal<File | null>(null);
+  readonly generalDocumentFiles = signal<SelectedDocument[]>([]);
+  readonly csvImportProgress = signal<string>('');
+  readonly currentDocumentId = signal<string | null>(null);
+  readonly savedDrafts = signal<SavedDraftSummary[]>([]);
+  readonly storageLocation = signal<string>('');
+  readonly openDraftBusy = signal(false);
+
+  readonly hasCompletedSelection = computed(() => {
+    const selected = this.selectedRows();
+    return this.rows().some(row => selected.has(row.caseId) && row.verificationStatus === 'Completed');
+  });
 
   readonly packetForm = this.fb.group({
     reportType: ['', Validators.required],
@@ -62,28 +97,37 @@ export class AppComponent implements OnInit {
     pinCode: ['', [Validators.required, Validators.pattern(/^[0-9]{6}$/)]],
     address: ['', Validators.required],
     state: ['', Validators.required],
-    verificationStatus: ['Pending' as 'Pending' | 'Completed', Validators.required],
-    informationFy: [''],
+    verificationStatus: ['Pending' as VerificationStatus, Validators.required],
+
+    informationFy: ['', Validators.required],
     informationSourceType: [''],
     informationSourceDescription: [''],
-    informationType: [''],
+    informationType: ['', Validators.required],
     informationDescription: [''],
-    informationValue: [''],
-    source: [''],
-    finding: [''],
-    actionableAy: [''],
-    statutoryReason: [''],
-    verificationResultType: [''],
-    incomeEscapingAssessmentValue: [''],
-    verificationInformationValue: [''],
+    informationValue: ['', Validators.required],
+    source: ['', Validators.required],
+    finding: ['', Validators.required],
+
+    actionableAy: ['', Validators.required],
+    statutoryReason: ['', Validators.required],
+    verificationResultType: ['', Validators.required],
+    incomeEscapingAssessmentValue: ['', Validators.required],
+    verificationInformationValue: ['', Validators.required],
     resultDescription: ['']
   });
 
   readonly rows = signal<PersonRow[]>([]);
   readonly documents = signal<AttachedDocument[]>([]);
-  readonly csvFile = signal<File | null>(null);
-  readonly generalDocumentFile = signal<File | null>(null);
-  readonly currentDocumentId = signal<string | null>(null);
+
+  readonly documentCountByCaseId = computed(() => {
+    const counts = new Map<string, number>();
+    for (const doc of this.documents()) {
+      for (const caseId of doc.rowCaseIds) {
+        counts.set(caseId, (counts.get(caseId) ?? 0) + 1);
+      }
+    }
+    return counts;
+  });
 
   readonly states = [
     'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh', 'Delhi', 'Goa', 'Gujarat',
@@ -100,10 +144,42 @@ export class AppComponent implements OnInit {
   readonly verificationResults = ['Income Escaping Assessment', 'No Income Escaping', 'Further Verification Required', 'Other'];
   readonly statutoryReasons = ['Mismatch', 'Undisclosed Income', 'Unverified Information', 'Other'];
 
-  ngOnInit(): void {
-    this.onlineWatcher();
-    this.restoreLocalDraft();
-  }
+  readonly csvHeaders = [
+    'PAN', 'Name', 'DOB/DOI', 'Mobile', 'E-Mail', 'PIN Code', 'Address', 'State',
+    'FY', 'Information Type', 'Findings', 'Source', 'Information Value', 'Description',
+    'Actionable AY', 'Verification Result Type', 'Statutory Reason',
+    'Income Escaping Assessment Value', 'Verification Information Value'
+  ];
+
+  readonly filteredRows = computed(() => {
+    const term = this.filter().trim().toLowerCase();
+    const source = this.rows();
+    if (!term) return source;
+    return source.filter(r => [r.pan, r.name, r.email, r.address, r.state, r.serialNo]
+      .some(v => v.toLowerCase().includes(term)));
+  });
+
+  readonly pageCount = computed(() => Math.max(1, Math.ceil(this.filteredRows().length / this.pageSize())));
+
+  readonly pagedRows = computed(() => {
+    const filtered = this.filteredRows();
+    const start = (this.page() - 1) * this.pageSize();
+    return filtered.slice(start, start + this.pageSize());
+  });
+
+  readonly pageNumbers = computed<PaginationItem[]>(() => {
+    const total = this.pageCount();
+    const current = this.page();
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const pages: PaginationItem[] = [1];
+    if (current > 4) pages.push('…');
+    const start = Math.max(2, current - 2);
+    const end = Math.min(total - 1, current + 2);
+    for (let p = start; p <= end; p++) pages.push(p);
+    if (current < total - 3) pages.push('…');
+    pages.push(total);
+    return pages;
+  });
 
   get packet(): PacketDetails {
     return this.packetForm.getRawValue() as PacketDetails;
@@ -113,21 +189,9 @@ export class AppComponent implements OnInit {
     return environment.defaultCaseDesignation;
   }
 
-  get filteredRows(): PersonRow[] {
-    const term = this.filter().trim().toLowerCase();
-    const source = this.rows();
-    if (!term) return source;
-    return source.filter(r => [r.pan, r.name, r.email, r.address, r.state, r.serialNo].some(v => v.toLowerCase().includes(term)));
-  }
-
-  get pagedRows(): PersonRow[] {
-    const filtered = this.filteredRows;
-    const start = (this.page() - 1) * this.pageSize();
-    return filtered.slice(start, start + this.pageSize());
-  }
-
-  get pageCount(): number {
-    return Math.max(1, Math.ceil(this.filteredRows.length / this.pageSize()));
+  ngOnInit(): void {
+    this.onlineWatcher();
+    void this.restoreLocalDraft();
   }
 
   goHome(): void {
@@ -138,17 +202,34 @@ export class AppComponent implements OnInit {
   startNew(): void {
     this.resetApplication();
     this.step.set(1);
+    this.packetEditMode.set(true);
   }
 
   async openExisting(): Promise<void> {
-    this.modal.set('openFile');
+    this.openDraftBusy.set(true);
+    try {
+      const [drafts, location] = await Promise.all([this.drafts.list(), this.drafts.getStorageLocation()]);
+      this.savedDrafts.set(drafts);
+      this.storageLocation.set(location);
+      this.modal.set('openFile');
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : 'Unable to read saved drafts.', 'error');
+    } finally {
+      this.openDraftBusy.set(false);
+    }
+  }
+
+  editPacket(): void {
+    this.packetEditMode.set(true);
+    this.toast.show('Packet details are editable now.', 'info');
   }
 
   closeModal(): void {
     this.modal.set('none');
     this.currentRowIndex.set(null);
     this.csvFile.set(null);
-    this.generalDocumentFile.set(null);
+    this.csvImportProgress.set('');
+    this.generalDocumentFiles.set([]);
     this.currentDocumentId.set(null);
   }
 
@@ -158,18 +239,27 @@ export class AppComponent implements OnInit {
       this.toast.show('Complete all mandatory packet and submitting-person fields.', 'error');
       return;
     }
+    this.packetEditMode.set(false);
     this.step.set(2);
   }
 
   back(): void {
-    if (this.step() === 1) this.step.set(0);
-    else if (this.step() === 2) this.step.set(1);
-    else if (this.step() === 3) this.step.set(2);
+    if (this.step() === 1) {
+      this.step.set(0);
+      return;
+    }
+    if (this.step() === 2) {
+      this.packetEditMode.set(false);
+      this.step.set(1);
+      return;
+    }
+    if (this.step() === 3) this.step.set(2);
   }
 
   nextToCreate(): void {
     if (!this.packetForm.valid) {
       this.step.set(1);
+      this.packetEditMode.set(true);
       this.toast.show('Complete packet details before proceeding.', 'error');
       return;
     }
@@ -181,18 +271,21 @@ export class AppComponent implements OnInit {
   }
 
   openAddRow(): void {
+    this.currentRowIndex.set(null);
     this.rowForm.reset({ verificationStatus: 'Pending' });
     this.personOpen.set(true);
-    this.infoOpen.set(false);
-    this.verificationOpen.set(false);
-    this.infoModalOpen.set(false);
-    this.verificationModalOpen.set(false);
+    this.infoOpen.set(true);
+    this.verificationOpen.set(true);
     this.modal.set('addRow');
   }
 
   editRow(index: number): void {
     const row = this.rows()[index];
     if (!row) return;
+    if (row.verificationStatus === 'Completed') {
+      this.toast.show('Completed rows are locked and cannot be edited.', 'info');
+      return;
+    }
     this.currentRowIndex.set(index);
     this.rowForm.patchValue({
       pan: row.pan,
@@ -220,100 +313,51 @@ export class AppComponent implements OnInit {
       resultDescription: row.verificationDetails.resultDescription
     });
     this.personOpen.set(true);
-    this.infoOpen.set(false);
-    this.verificationOpen.set(false);
+    this.infoOpen.set(true);
+    this.verificationOpen.set(true);
     this.modal.set('addRow');
   }
 
   saveRow(): void {
     this.rowForm.markAllAsTouched();
-    const panControl = this.rowForm.controls.pan;
-    if (panControl.errors?.['required']) {
-      this.toast.show('PAN is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (panControl.errors?.['pattern']) {
-      this.toast.show('Invalid PAN format: Must be 10 characters with 5 letters, 4 numbers, 1 letter (e.g. ABCDE1234F).', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (this.rowForm.controls.name.invalid) {
-      this.toast.show('Name is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (this.rowForm.controls.dobDoi.invalid) {
-      this.toast.show('DOB/DOI is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    const mobileControl = this.rowForm.controls.mobile;
-    if (mobileControl.errors?.['required']) {
-      this.toast.show('Mobile number is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (mobileControl.errors?.['pattern']) {
-      this.toast.show('Invalid Mobile number: Must be exactly 10 digits.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    const emailControl = this.rowForm.controls.email;
-    if (emailControl.errors?.['required']) {
-      this.toast.show('E-mail is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (emailControl.errors?.['email']) {
-      this.toast.show('Invalid E-mail address format.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    const pinControl = this.rowForm.controls.pinCode;
-    if (pinControl.errors?.['required']) {
-      this.toast.show('PIN Code is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (pinControl.errors?.['pattern']) {
-      this.toast.show('Invalid PIN Code: Must be exactly 6 digits.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (this.rowForm.controls.address.invalid) {
-      this.toast.show('Address is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
-    if (this.rowForm.controls.state.invalid) {
-      this.toast.show('State is required.', 'error');
-      this.personOpen.set(true);
-      return;
-    }
+    const invalidRequired = [
+      'pan', 'name', 'dobDoi', 'mobile', 'email', 'pinCode', 'address', 'state',
+      'informationFy', 'informationType', 'finding', 'source', 'informationValue',
+      'actionableAy', 'statutoryReason', 'verificationResultType',
+      'incomeEscapingAssessmentValue', 'verificationInformationValue'
+    ].some(name => this.rowForm.get(name)?.invalid);
 
-    const v = this.rowForm.getRawValue();
-    const informationDetails: InformationDetails = {
-      informationFy: v.informationFy || '',
-      informationSourceType: v.informationSourceType || '',
-      informationSourceDescription: v.informationSourceDescription || '',
-      informationType: v.informationType || '',
-      informationDescription: v.informationDescription || '',
-      informationValue: v.informationValue || '',
-      source: v.source || '',
-      finding: v.finding || ''
-    };
-    const verificationDetails: VerificationDetails = {
-      actionableAy: v.actionableAy || '',
-      statutoryReason: v.statutoryReason || '',
-      verificationResultType: v.verificationResultType || '',
-      incomeEscapingAssessmentValue: v.incomeEscapingAssessmentValue || '',
-      informationValue: v.verificationInformationValue || '',
-      resultDescription: v.resultDescription || ''
-    };
+    if (invalidRequired) {
+      this.toast.show('Complete all mandatory Person, Information and Verification details before saving.', 'error');
+      if (this.hasPersonValidationError()) this.personOpen.set(true);
+      else if (this.hasInformationValidationError()) this.infoOpen.set(true);
+      else this.verificationOpen.set(true);
+      return;
+    }
 
     const existingIndex = this.currentRowIndex();
     const existing = existingIndex !== null ? this.rows()[existingIndex] : null;
+    const v = this.rowForm.getRawValue();
+
+    const informationDetails: InformationDetails = {
+      informationFy: v.informationFy!.trim(),
+      informationSourceType: v.informationSourceType?.trim() || '',
+      informationSourceDescription: v.informationSourceDescription?.trim() || '',
+      informationType: v.informationType!.trim(),
+      informationDescription: v.informationDescription?.trim() || '',
+      informationValue: v.informationValue!.trim(),
+      source: v.source!.trim(),
+      finding: v.finding!.trim()
+    };
+    const verificationDetails: VerificationDetails = {
+      actionableAy: v.actionableAy!.trim(),
+      statutoryReason: v.statutoryReason!.trim(),
+      verificationResultType: v.verificationResultType!.trim(),
+      incomeEscapingAssessmentValue: v.incomeEscapingAssessmentValue!.trim(),
+      informationValue: v.verificationInformationValue!.trim(),
+      resultDescription: v.resultDescription?.trim() || ''
+    };
+
     const row: PersonRow = {
       serialNo: existing?.serialNo ?? String(this.rows().length + 1).padStart(5, '0'),
       caseId: existing?.caseId ?? this.makeCaseId(this.rows().length + 1),
@@ -325,7 +369,7 @@ export class AppComponent implements OnInit {
       pinCode: v.pinCode!.trim(),
       address: v.address!.trim(),
       state: v.state!,
-      verificationStatus: v.verificationStatus!,
+      verificationStatus: existing?.verificationStatus ?? 'Pending',
       informationDetails,
       verificationDetails
     };
@@ -335,9 +379,17 @@ export class AppComponent implements OnInit {
       if (existingIndex === null) next.push(row); else next[existingIndex] = row;
       return next;
     });
-    this.page.set(this.pageCount);
+    this.page.set(this.pageCount());
     this.closeModal();
-    this.toast.show(existingIndex === null ? 'Row added successfully.' : 'Row updated successfully.', 'success');
+    this.toast.show(existingIndex === null ? 'Row saved successfully.' : 'Row updated successfully.', 'success');
+  }
+
+  private hasPersonValidationError(): boolean {
+    return ['pan', 'name', 'dobDoi', 'mobile', 'email', 'pinCode', 'address', 'state'].some(name => this.rowForm.get(name)?.invalid);
+  }
+
+  private hasInformationValidationError(): boolean {
+    return ['informationFy', 'informationType', 'finding', 'source', 'informationValue'].some(name => this.rowForm.get(name)?.invalid);
   }
 
   deleteSelected(): void {
@@ -346,20 +398,48 @@ export class AppComponent implements OnInit {
       this.toast.show('Select at least one row to delete.', 'info');
       return;
     }
-    const next = this.rows().filter(row => !selected.has(row.caseId)).map((row, i) => ({ ...row, serialNo: String(i + 1).padStart(5, '0') }));
+    if (this.hasCompletedSelection()) {
+      this.toast.show('Completed rows cannot be deleted.', 'info');
+      return;
+    }
+    const next = this.rows()
+      .filter(row => !selected.has(row.caseId))
+      .map((row, i) => ({ ...row, serialNo: String(i + 1).padStart(5, '0') }));
     this.rows.set(next);
     this.selectedRows.set(new Set());
+    this.page.set(Math.min(this.page(), this.pageCount()));
     this.toast.show('Selected rows deleted.', 'success');
   }
 
   validateRows(): void {
-    if (!this.rows().length) {
-      this.toast.show('There are no rows to validate.', 'info');
+    const selectedIds = this.selectedRows();
+    if (!selectedIds.size) {
+      this.toast.show('Select one or more Approved rows before validating.', 'info');
       return;
     }
-    const invalid = this.rows().filter(r => !r.pan || !r.name || !r.mobile || !r.email || !r.pinCode || !r.address || !r.state);
-    if (invalid.length) this.toast.show(`${invalid.length} row(s) have missing mandatory fields.`, 'error');
-    else this.toast.show(`${this.rows().length} row(s) passed local validation.`, 'success');
+    if (this.hasCompletedSelection()) {
+      this.toast.show('Completed rows cannot be validated.', 'info');
+      return;
+    }
+    const selected = this.rows().filter(row => selectedIds.has(row.caseId));
+    const notApproved = selected.filter(row => row.verificationStatus !== 'Approved');
+    if (notApproved.length) {
+      this.toast.show('Only rows with Approved status can be validated. Pending and Completed rows were not changed.', 'error');
+      return;
+    }
+    this.rows.update(current => current.map(row => selectedIds.has(row.caseId)
+      ? { ...row, verificationStatus: 'Completed' }
+      : row));
+    this.selectedRows.set(new Set());
+    this.toast.show(`${selected.length} Approved row(s) converted to Completed.`, 'success');
+  }
+
+  setRowVerificationStatus(row: PersonRow, value: string): void {
+    if (row.verificationStatus === 'Completed') return;
+    if (value !== 'Pending' && value !== 'Approved') return;
+    this.rows.update(current => current.map(item => item.caseId === row.caseId
+      ? { ...item, verificationStatus: value as VerificationStatus }
+      : item));
   }
 
   toggleRow(row: PersonRow, checked: boolean): void {
@@ -371,14 +451,18 @@ export class AppComponent implements OnInit {
   }
 
   allVisibleSelected(): boolean {
-    const visible = this.pagedRows;
-    return visible.length > 0 && visible.every(row => this.selectedRows().has(row.caseId));
+    const actionable = this.pagedRows().filter(row => row.verificationStatus !== 'Completed');
+    return actionable.length > 0 && actionable.every(row => this.selectedRows().has(row.caseId));
   }
 
   toggleAllVisible(checked: boolean): void {
     this.selectedRows.update(set => {
       const next = new Set(set);
-      for (const row of this.pagedRows) {
+      for (const row of this.pagedRows()) {
+        if (row.verificationStatus === 'Completed') {
+          next.delete(row.caseId);
+          continue;
+        }
         if (checked) next.add(row.caseId); else next.delete(row.caseId);
       }
       return next;
@@ -390,8 +474,9 @@ export class AppComponent implements OnInit {
     this.page.set(1);
   }
 
-  setPage(value: number): void {
-    this.page.set(Math.max(1, Math.min(this.pageCount, value)));
+  setPage(value: number | '…'): void {
+    if (value === '…') return;
+    this.page.set(Math.max(1, Math.min(this.pageCount(), value)));
   }
 
   changePageSize(value: string): void {
@@ -404,39 +489,47 @@ export class AppComponent implements OnInit {
     this.modal.set('csv');
   }
 
+  async browseForCsv(input: HTMLInputElement): Promise<void> {
+    if (!('__TAURI_INTERNALS__' in window)) {
+      input.click();
+      return;
+    }
+
+    try {
+      const picked = await invoke<NativePickedFile | null>('pick_file');
+      if (picked) {
+        const uint8Array = new Uint8Array(picked.bytes);
+        const file = new File([uint8Array], picked.file_name, { type: 'text/csv' });
+        this.csvFile.set(file);
+        void this.importCsv();
+      }
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : 'Unable to select the CSV file.', 'error');
+    }
+  }
+
   handleCsvSelection(event: Event): void {
     const file = (event.target as HTMLInputElement).files?.[0] || null;
+    if (!file) return;
     this.csvFile.set(file);
+    // Auto-import immediately after the user picks a file — no need to click "Load CSV" separately
+    void this.importCsv();
   }
 
   handleCsvDrop(event: DragEvent): void {
     event.preventDefault();
     const file = event.dataTransfer?.files?.[0] || null;
-    if (file) this.csvFile.set(file);
+    if (!file) return;
+    this.csvFile.set(file);
+    // Auto-import immediately after drop
+    void this.importCsv();
   }
 
   handleDocumentDrop(event: DragEvent): void {
     event.preventDefault();
-    const file = event.dataTransfer?.files?.[0] || null;
-    if (file) this.generalDocumentFile.set(file);
-  }
-
-  handleDraftDrop(event: DragEvent): void {
-    event.preventDefault();
-    const file = event.dataTransfer?.files?.[0] || null;
-    if (file) {
-      void file.text().then(text => {
-        try {
-          const draft = JSON.parse(text) as DraftState;
-          if (draft.version !== 1 || !draft.packet || !Array.isArray(draft.rows)) throw new Error('Unsupported draft file.');
-          this.applyDraft(draft);
-          this.modal.set('none');
-          this.toast.show('Existing draft opened.', 'success');
-        } catch (error) {
-          this.toast.show(error instanceof Error ? error.message : 'Unable to open the draft file.', 'error');
-        }
-      });
-    }
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    this.generalDocumentFiles.set(files.map(file => ({ file, fileSize: file.size })));
   }
 
   onDragOver(event: DragEvent): void {
@@ -453,103 +546,252 @@ export class AppComponent implements OnInit {
       this.toast.show('CSV files larger than 25 MB are not allowed.', 'error');
       return;
     }
+
     this.importBusy.set(true);
+    this.csvImportProgress.set('Reading CSV…');
     try {
       const text = await file.text();
-      const records = this.parseCsv(text);
       const imported: PersonRow[] = [];
-      records.forEach((record, index) => {
-        const row = this.mapCsvRecord(record, this.rows().length + index + 1);
-        if (row) imported.push(row);
-      });
-      if (!imported.length) throw new Error('No usable records were found in the CSV.');
+      const baseIndex = this.rows().length;
+      let headers: string[] | null = null;
+      let recordsRead = 0;
+
+      for await (const record of this.streamCsvRecords(text)) {
+        if (!headers) {
+          headers = record.values.map(value => value.trim().replace(/^\uFEFF/, ''));
+          this.validateCsvHeaders(headers);
+          continue;
+        }
+
+        const values = record.values;
+        if (values.length !== headers.length) {
+          throw new Error(`Invalid CSV data at row ${record.rowNumber}: expected ${headers.length} columns but found ${values.length}.`);
+        }
+
+        const mapped = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ''])) as Record<string, string>;
+        imported.push(this.mapCsvRecord(mapped, baseIndex + imported.length + 1, record.rowNumber));
+        recordsRead++;
+
+        if (recordsRead % 2000 === 0) {
+          this.csvImportProgress.set(`Validating ${recordsRead.toLocaleString()} records…`);
+          await this.yieldToBrowser();
+        }
+      }
+
+      if (!headers) throw new Error('CSV file is empty.');
+      if (!imported.length) throw new Error('CSV contains no data rows.');
+
+      // Single signal update keeps 100k+ row imports O(n) instead of repeatedly copying the full array.
       this.rows.update(current => [...current, ...imported]);
       this.page.set(1);
+      this.filter.set('');
       this.modal.set('none');
-      this.toast.show(`${imported.length} records imported successfully.`, 'success');
+      this.csvImportProgress.set('');
+      this.toast.show(`${imported.length.toLocaleString()} records imported successfully.`, 'success');
     } catch (error) {
+      this.csvImportProgress.set('');
       this.toast.show(error instanceof Error ? error.message : 'CSV import failed.', 'error');
     } finally {
       this.importBusy.set(false);
     }
   }
 
-  exportCsv(): void {
-    const headers = ['Sr. No.', 'PAN', 'Name', 'DOB/DOI', 'Mobile', 'E-Mail', 'PIN Code', 'Address', 'State', 'Verification Status', 'Information FY', 'Information Source Type', 'Information Source Description', 'Information Type', 'Information Description', 'Information Value', 'Source', 'Finding', 'Actionable AY', 'Statutory Reason', 'Verification Result Type', 'Income Escaping Assessment Value', 'Verification Information Value', 'Verification Result Description'];
-    const esc = (v: string) => `"${v.replaceAll('\"', '\"\"')}"`;
-    const lines = [headers.map(esc).join(',')];
+  async exportCsv(): Promise<void> {
+    const esc = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const lines = [this.csvHeaders.map(esc).join(',')];
     for (const r of this.rows()) {
-      lines.push([r.serialNo, r.pan, r.name, r.dobDoi, r.mobile, r.email, r.pinCode, r.address, r.state, r.verificationStatus, r.informationDetails.informationFy, r.informationDetails.informationSourceType, r.informationDetails.informationSourceDescription, r.informationDetails.informationType, r.informationDetails.informationDescription, r.informationDetails.informationValue, r.informationDetails.source, r.informationDetails.finding, r.verificationDetails.actionableAy, r.verificationDetails.statutoryReason, r.verificationDetails.verificationResultType, r.verificationDetails.incomeEscapingAssessmentValue, r.verificationDetails.informationValue, r.verificationDetails.resultDescription].map(esc).join(','));
+      lines.push([
+        r.pan,
+        r.name,
+        r.dobDoi,
+        r.mobile,
+        r.email,
+        r.pinCode,
+        r.address,
+        r.state,
+        r.informationDetails.informationFy,
+        r.informationDetails.informationType,
+        r.informationDetails.finding,
+        r.informationDetails.source,
+        r.informationDetails.informationValue,
+        r.informationDetails.informationDescription,
+        r.verificationDetails.actionableAy,
+        r.verificationDetails.verificationResultType,
+        r.verificationDetails.statutoryReason,
+        r.verificationDetails.incomeEscapingAssessmentValue,
+        r.verificationDetails.informationValue
+      ].map(esc).join(','));
     }
-    this.downloadBlob(new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' }), `${this.packet.referenceNumber || 'data-upload'}-rows.csv`);
+    await this.saveExport(lines.join('\r\n'), `${this.packet.referenceNumber || 'data-upload'}-rows.csv`);
   }
 
-  downloadSampleCsv(): void {
-    const csv = `Sr. No.,PAN,Name,DOB/DOI,Mobile,E-Mail,PIN Code,Address,State,Verification Status,Information FY,Information Source Type,Information Type,Information Value,Actionable AY,Verification Result Type\n00001,XZQWE9876J,Neha Sharma,15/03/1985,9876543210,neha.sharma@example.in,400050,"Bandra West, Mumbai",Maharashtra,Completed,2025-26,Digital,Financial Information,125000,2026-27,Income Escaping Assessment\n00002,LMNOP4321K,Ravi Kumar,08/11/1990,9876543211,ravi.kumar@example.in,560034,"Koramangala, Bangalore",Karnataka,Completed,2025-26,Portal,Banking Information,84000,2026-27,Further Verification Required\n00003,QWERT5678L,Sonal Mehta,29/07/1982,9876543212,sonal.mehta@example.in,700064,"Salt Lake, Kolkata",West Bengal,Pending,2024-25,Third Party,Property Information,2400000,2025-26,No Income Escaping\n`;
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    this.downloadBlob(blob, 'sample-data-upload.csv');
+
+  private async saveExport(content: string, suggestedName: string, mimeType = 'text/csv;charset=utf-8'): Promise<void> {
+    const isCSV = mimeType.startsWith('text/csv');
+    // Prepend UTF-8 BOM for CSV so Excel auto-detects encoding correctly
+    const bom = isCSV ? '\uFEFF' : '';
+    const blob = new Blob([bom + content], { type: mimeType });
+
+    try {
+      // 1️⃣ File System Access API — lets the user pick save location + enforces extension
+      if ('showSaveFilePicker' in window) {
+        try {
+          const fileHandle = await (window as any).showSaveFilePicker({
+            suggestedName,
+            types: [{
+              description: isCSV ? 'CSV Spreadsheet' : 'JSON File',
+              accept: isCSV ? { 'text/csv': ['.csv'] } : { 'application/json': ['.json'] }
+            }]
+          });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          this.toast.show(`${suggestedName} saved successfully.`, 'success');
+          return;
+        } catch (fsErr: any) {
+          // AbortError means the user dismissed the picker — don't show an error toast
+          if (fsErr?.name === 'AbortError') return;
+          console.warn('showSaveFilePicker failed; trying next method.', fsErr);
+        }
+      }
+
+      // 2️⃣ Tauri native save dialog (non-CSV only — CSV extension can't be enforced there)
+      if (!isCSV && '__TAURI_INTERNALS__' in window) {
+        try {
+          const path = await invoke<string | null>('save_export_file', { suggestedName, content });
+          if (path) {
+            this.toast.show(`${suggestedName} saved to ${path}.`, 'success');
+            return;
+          }
+          // null → user cancelled
+          return;
+        } catch (nativeError) {
+          console.warn('Tauri native save failed; falling back to blob download.', nativeError);
+        }
+      }
+
+      // 3️⃣ Final fallback — auto-download to default Downloads folder
+      this.downloadBlob(blob, suggestedName);
+      this.toast.show(`${suggestedName} downloaded to your Downloads folder.`, 'success');
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : `Unable to save ${suggestedName}.`, 'error');
+    }
   }
 
   openGeneralDocument(): void {
-    if (!this.rows().length) {
-      this.toast.show('Add or import at least one row before attaching a general document.', 'info');
+    if (this.selectedRows().size === 0) {
+      this.toast.show('Select at least one row before opening General Document.', 'info');
       return;
     }
-    this.generalDocumentFile.set(null);
+    this.generalDocumentFiles.set([]);
     this.currentDocumentId.set(null);
-    this.attachedForAll.set(this.selectedRows().size === 0);
+    this.attachedForAll.set(false);
     this.modal.set('generalDoc');
   }
 
-  handleDocumentSelection(event: Event): void {
-    const file = (event.target as HTMLInputElement).files?.[0] || null;
-    this.generalDocumentFile.set(file);
+  async handleDocumentSelection(event: Event): Promise<void> {
+    const files = Array.from((event.target as HTMLInputElement).files ?? []);
+    if (!files.length) return;
+
+    if (!('__TAURI_INTERNALS__' in window)) {
+      this.generalDocumentFiles.set(files.map(file => ({
+        file,
+        fileSize: file.size
+      })));
+      return;
+    }
+
+    // The native picker provides stable filesystem references. We intentionally do not read all
+    // selected files into memory; files are read one-at-a-time only when the packet is submitted.
+    this.generalDocumentFiles.set(files.map(file => ({ file, fileSize: file.size })));
   }
 
-  async browseForDocument(input: HTMLInputElement): Promise<void> {
+  async browseForDocuments(input: HTMLInputElement): Promise<void> {
     if (!('__TAURI_INTERNALS__' in window)) {
       input.click();
       return;
     }
 
     try {
-      const selection = await invoke<[string, number[]] | null>('pick_file');
-      if (!selection) return;
-
-      const [name, bytes] = selection;
-      this.generalDocumentFile.set(new File([new Uint8Array(bytes)], name));
+      const selection = await invoke<NativePickedDocument[]>('pick_supporting_documents');
+      this.generalDocumentFiles.set(selection.map(item => ({
+        file: new File([], item.file_name, { type: item.extension ? 'application/octet-stream' : 'application/octet-stream' }),
+        filePath: item.file_path,
+        fileSize: item.file_size
+      })));
     } catch (error) {
-      this.toast.show(error instanceof Error ? error.message : 'Unable to select the document.', 'error');
+      this.toast.show(error instanceof Error ? error.message : 'Unable to select the document(s).', 'error');
     }
   }
 
   saveGeneralDocument(): void {
-    const file = this.generalDocumentFile();
-    if (!file) {
-      this.toast.show('Choose a document first.', 'error');
+    const selectedFiles = this.generalDocumentFiles();
+    if (!selectedFiles.length) {
+      this.toast.show('Choose at least one document first.', 'error');
       return;
     }
-    if (file.size > 25 * 1024 * 1024) {
-      this.toast.show('Documents larger than 25 MB are not allowed by the utility UI.', 'error');
+    if (!this.documentType().trim() || !this.documentDescription().trim()) {
+      this.toast.show('Document Type and Description are required.', 'error');
       return;
     }
-    const selected = [...this.selectedRows()];
-    const useAll = this.attachedForAll() || selected.length === 0;
-    const targets = useAll ? this.rows().map(r => r.caseId) : selected;
+
+    for (const selected of selectedFiles) {
+      if (selected.fileSize > 25 * 1024 * 1024) {
+        this.toast.show(`Document '${selected.file.name}' is larger than 25 MB.`, 'error');
+        return;
+      }
+    }
+
+    const selectedRowIds = [...this.selectedRows()];
+    const useAll = this.attachedForAll() && this.rows().length > 0;
+    const targets = useAll ? this.rows().map(r => r.caseId) : selectedRowIds;
+    if (!targets.length) {
+      this.toast.show('Select at least one row for the document.', 'error');
+      return;
+    }
+
     const existingId = this.currentDocumentId();
-    const doc: AttachedDocument = {
-      id: existingId || crypto.randomUUID(),
-      fileName: file.name,
-      docType: this.documentType(),
-      description: this.documentDescription(),
-      attachedFor: useAll ? 'All Rows' : 'Selected Rows',
-      rowCaseIds: targets,
-      file
-    };
-    this.documents.update(list => existingId ? list.map(item => item.id === existingId ? doc : item) : [...list, doc]);
+    if (existingId) {
+      const replacement = selectedFiles[0];
+      const existing = this.documents().find(item => item.id === existingId);
+      const doc: AttachedDocument = {
+        id: existingId,
+        fileName: replacement.file.name,
+        docType: this.documentType().trim(),
+        description: this.documentDescription().trim(),
+        attachedFor: useAll ? 'All Rows' : 'Selected Rows',
+        rowCaseIds: targets,
+        file: replacement.file,
+        filePath: replacement.filePath,
+        fileSize: replacement.fileSize,
+        fileType: replacement.file.type,
+        lastModified: replacement.file.lastModified
+      };
+      this.documents.update(list => list.map(item => item.id === existingId ? doc : item));
+    } else {
+      const newDocuments: AttachedDocument[] = selectedFiles.map(selected => ({
+        id: crypto.randomUUID(),
+        fileName: selected.file.name,
+        docType: this.documentType().trim(),
+        description: this.documentDescription().trim(),
+        attachedFor: useAll ? 'All Rows' : 'Selected Rows',
+        rowCaseIds: targets,
+        file: selected.file,
+        filePath: selected.filePath,
+        fileSize: selected.fileSize,
+        fileType: selected.file.type,
+        lastModified: selected.file.lastModified
+      }));
+      this.documents.update(list => [...list, ...newDocuments]);
+    }
+
     this.currentDocumentId.set(null);
+    this.generalDocumentFiles.set([]);
     this.modal.set('none');
-    this.toast.show(`Document ${useAll ? 'attached to all rows' : `attached to ${selected.length} selected row(s)`}.`, 'success');
+    this.toast.show(
+      `${selectedFiles.length} document(s) attached to ${useAll ? 'all rows' : `${selectedRowIds.length} selected row(s)`}.`,
+      'success'
+    );
   }
 
   removeDocument(id: string): void {
@@ -560,7 +802,11 @@ export class AppComponent implements OnInit {
     this.currentDocumentId.set(doc.id);
     this.documentType.set(doc.docType);
     this.documentDescription.set(doc.description);
-    this.generalDocumentFile.set(doc.file || null);
+    this.generalDocumentFiles.set([{
+      file: doc.file || new File([], doc.fileName, { type: doc.fileType || 'application/octet-stream', lastModified: doc.lastModified || Date.now() }),
+      filePath: doc.filePath,
+      fileSize: doc.fileSize ?? doc.file?.size ?? 0
+    }]);
     this.attachedForAll.set(doc.attachedFor === 'All Rows');
     this.modal.set('generalDoc');
   }
@@ -578,11 +824,18 @@ export class AppComponent implements OnInit {
         docType: doc.docType,
         description: doc.description,
         attachedFor: doc.attachedFor,
-        rowCaseIds: doc.rowCaseIds
-      }))
+        rowCaseIds: doc.rowCaseIds,
+        filePath: doc.filePath,
+        fileSize: doc.fileSize ?? doc.file?.size,
+        fileType: doc.fileType ?? doc.file?.type,
+        lastModified: doc.lastModified ?? doc.file?.lastModified
+      })),
+      draftId: this.currentDraftId() ?? undefined
     };
+
     try {
-      await this.drafts.save(draft, this.documents());
+      const saved = await this.drafts.save(draft, this.documents());
+      this.currentDraftId.set(saved.id);
       this.lastSavedAt.set(draft.savedAt);
       this.toast.show('Draft saved locally on this device.', 'success');
     } catch (error) {
@@ -590,15 +843,30 @@ export class AppComponent implements OnInit {
     }
   }
 
-  async loadDraftFromBrowser(): Promise<void> {
-    const bundle = await this.drafts.load();
-    if (!bundle) {
-      this.toast.show('No local draft was found.', 'info');
-      return;
+  async openSavedDraft(id: string): Promise<void> {
+    this.openDraftBusy.set(true);
+    try {
+      const bundle = await this.drafts.loadById(id);
+      if (!bundle) throw new Error('Saved draft could not be found.');
+      this.applyDraft(bundle);
+      this.modal.set('none');
+      this.toast.show('Existing draft opened.', 'success');
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : 'Unable to open saved draft.', 'error');
+    } finally {
+      this.openDraftBusy.set(false);
     }
-    this.applyDraft(bundle.draft, bundle.files);
-    this.toast.show('Local draft restored.', 'success');
-    this.modal.set('none');
+  }
+
+  async deleteSavedDraft(id: string): Promise<void> {
+    try {
+      await this.drafts.remove(id);
+      this.savedDrafts.update(list => list.filter(item => item.id !== id));
+      if (this.currentDraftId() === id) this.currentDraftId.set(null);
+      this.toast.show('Saved draft deleted.', 'success');
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : 'Unable to delete saved draft.', 'error');
+    }
   }
 
   handleDraftFile(event: Event): void {
@@ -607,17 +875,39 @@ export class AppComponent implements OnInit {
     void file.text().then(text => {
       try {
         const draft = JSON.parse(text) as DraftState;
-        if (draft.version !== 1 || !draft.packet || !Array.isArray(draft.rows)) throw new Error('Unsupported draft file.');
-        this.applyDraft(draft);
+        if (
+          draft.version !== 1 ||
+          !draft.packet ||
+          typeof draft.packet.referenceNumber !== 'string' ||
+          !Array.isArray(draft.rows)
+        ) {
+          throw new Error('Unsupported draft file. Export the draft using this utility and try again.');
+        }
+        if (!Array.isArray(draft.documents)) draft.documents = [];
+
+        const invalidRow = draft.rows.find(row => !row.caseId || !row.pan || !row.name || !row.informationDetails || !row.verificationDetails);
+        if (invalidRow) throw new Error('Draft contains an invalid person row.');
+
+        this.applyDraft({ draft, files: {} });
         this.modal.set('none');
-        this.toast.show('Existing draft opened.', 'success');
+
+        const localDocuments = draft.documents.filter(doc => !!doc.filePath).length;
+        const missingDocuments = draft.documents.length - localDocuments;
+        if (missingDocuments > 0) {
+          this.toast.show(
+            `Draft imported with ${missingDocuments} document reference(s). Re-select any missing local files before final submission.`,
+            'info'
+          );
+        } else {
+          this.toast.show('Existing draft file opened.', 'success');
+        }
       } catch (error) {
         this.toast.show(error instanceof Error ? error.message : 'Unable to open the draft file.', 'error');
       }
     });
   }
 
-  exportDraftFile(): void {
+  async exportDraftFile(): Promise<void> {
     const draft: DraftState = {
       version: 1,
       savedAt: new Date().toISOString(),
@@ -630,12 +920,16 @@ export class AppComponent implements OnInit {
         docType: doc.docType,
         description: doc.description,
         attachedFor: doc.attachedFor,
-        rowCaseIds: doc.rowCaseIds
-      }))
+        rowCaseIds: doc.rowCaseIds,
+        filePath: doc.filePath,
+        fileSize: doc.fileSize ?? doc.file?.size,
+        fileType: doc.fileType ?? doc.file?.type,
+        lastModified: doc.lastModified ?? doc.file?.lastModified
+      })),
+      draftId: this.currentDraftId() ?? undefined
     };
-    const blob = new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' });
     const ref = this.packet.referenceNumber.trim() || 'data-upload-draft';
-    this.downloadBlob(blob, `${ref}-draft.json`);
+    await this.saveExport(JSON.stringify(draft, null, 2), `${ref}-draft.json`, 'application/json');
   }
 
   async createPacket(): Promise<void> {
@@ -645,12 +939,14 @@ export class AppComponent implements OnInit {
     try {
       await this.api.submitPacket(this.packet);
       this.progressMessage.set(`Submitting ${this.rows().length} case record(s)…`);
-      await this.runWithConcurrency(this.rows(), 4, async (row) => {
+      const documentIndex = this.buildDocumentIndex();
+      await this.runWithConcurrency(this.rows(), 4, async row => {
         await this.api.submitCase(row, this.packet);
-        const docs = this.documents().filter(d => d.rowCaseIds.includes(row.caseId) && d.file);
+        const docs = documentIndex.get(row.caseId) ?? [];
         for (const doc of docs) {
           this.progressMessage.set(`Uploading ${doc.fileName} for ${row.name}…`);
-          await this.api.uploadFile(doc.file!, row.caseId, {
+          const file = await this.materializeDocumentFile(doc);
+          await this.api.uploadFile(file, row.caseId, {
             label: doc.fileName,
             type: doc.docType,
             description: doc.description,
@@ -659,6 +955,7 @@ export class AppComponent implements OnInit {
         }
       });
       await this.drafts.clear();
+      this.currentDraftId.set(null);
       this.progressMessage.set('Packet created successfully.');
       this.modal.set('saveSuccess');
       this.toast.show('Packet submitted successfully.', 'success');
@@ -667,6 +964,102 @@ export class AppComponent implements OnInit {
       this.progressMessage.set('Submission stopped. You can save the draft and retry later.');
     } finally {
       this.finalSubmitBusy.set(false);
+    }
+  }
+
+  private buildDocumentIndex(): Map<string, AttachedDocument[]> {
+    const index = new Map<string, AttachedDocument[]>();
+    for (const doc of this.documents()) {
+      for (const caseId of doc.rowCaseIds) {
+        const bucket = index.get(caseId);
+        if (bucket) {
+          bucket.push(doc);
+        } else {
+          index.set(caseId, [doc]);
+        }
+      }
+    }
+    return index;
+  }
+
+  private async materializeDocumentFile(doc: AttachedDocument): Promise<File> {
+    if (doc.file && doc.file.size > 0) return doc.file;
+    if (doc.filePath && '__TAURI_INTERNALS__' in window) {
+      const bytes = await invoke<number[]>('read_file_bytes', { filePath: doc.filePath });
+      return new File(
+        [new Uint8Array(bytes)],
+        doc.fileName,
+        {
+          type: doc.fileType || 'application/octet-stream',
+          lastModified: doc.lastModified || Date.now()
+        }
+      );
+    }
+    throw new Error(`Document '${doc.fileName}' is not available. Re-select the document before submitting.`);
+  }
+
+  private async yieldToBrowser(): Promise<void> {
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+
+  private async *streamCsvRecords(text: string): AsyncGenerator<{ values: string[]; rowNumber: number }> {
+    let row: string[] = [];
+    let field = '';
+    let quoted = false;
+    let rowNumber = 1;
+
+    const emit = () => {
+      const values = row;
+      row = [];
+      return values;
+    };
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const next = text[i + 1];
+
+      if (quoted && ch === '"' && next === '"') {
+        field += '"';
+        i++;
+        continue;
+      }
+
+      if (ch === '"') {
+        quoted = !quoted;
+        continue;
+      }
+
+      if (!quoted && ch === ',') {
+        row.push(field);
+        field = '';
+        continue;
+      }
+
+      if (!quoted && (ch === '\n' || ch === '\r')) {
+        if (ch === '\r' && next === '\n') i++;
+        row.push(field);
+        field = '';
+        const values = emit();
+        if (values.some(v => v.trim() !== '')) {
+          yield { values, rowNumber };
+        }
+        rowNumber++;
+        continue;
+      }
+
+      field += ch;
+    }
+
+    if (quoted) {
+      throw new Error(`Invalid CSV format: an opening quote was not closed.`);
+    }
+
+    if (field.length || row.length) {
+      row.push(field);
+      const values = emit();
+      if (values.some(v => v.trim() !== '')) {
+        yield { values, rowNumber };
+      }
     }
   }
 
@@ -682,75 +1075,81 @@ export class AppComponent implements OnInit {
     await Promise.all(workers);
   }
 
-  private mapCsvRecord(record: Record<string, string>, index: number): PersonRow | null {
-    const v = (keys: string[]): string => {
-      for (const key of keys) {
-        const found = Object.entries(record).find(([header]) => this.normalHeader(header) === this.normalHeader(key));
-        if (found?.[1]) return found[1].trim();
-      }
-      return '';
-    };
+  private validateCsvHeaders(headers: string[]): void {
+    const normalizedActual = headers.map(this.normalHeader);
+    const normalizedExpected = this.csvHeaders.map(this.normalHeader);
+    if (normalizedActual.length !== normalizedExpected.length || normalizedActual.some((header, index) => header !== normalizedExpected[index])) {
+      throw new Error(`Invalid CSV format. Use Export CSV or Download sample CSV to get the exact required column order.`);
+    }
+  }
 
-    const pan = v(['PAN', 'Source PAN']);
-    const name = v(['Name']);
-    if (!pan || !name) return null;
+  private mapCsvRecord(record: Record<string, string>, index: number, csvRowNumber: number): PersonRow {
+    const v = (header: string): string => record[header]?.trim() ?? '';
+    const pan = v('PAN');
+    const name = v('Name');
+    const dobDoi = v('DOB/DOI');
+    const mobile = v('Mobile');
+    const email = v('E-Mail');
+    const pinCode = v('PIN Code');
+    const address = v('Address');
+    const state = v('State');
+    const informationFy = v('FY');
+    const informationType = v('Information Type');
+    const finding = v('Findings');
+    const source = v('Source');
+    const informationValue = v('Information Value');
+    const description = v('Description');
+    const actionableAy = v('Actionable AY');
+    const verificationResultType = v('Verification Result Type');
+    const statutoryReason = v('Statutory Reason');
+    const incomeEscapingAssessmentValue = v('Income Escaping Assessment Value');
+    const verificationInformationValue = v('Verification Information Value');
+
+    const required = [
+      ['PAN', pan], ['Name', name], ['DOB/DOI', dobDoi], ['Mobile', mobile], ['E-Mail', email], ['PIN Code', pinCode],
+      ['Address', address], ['State', state], ['FY', informationFy], ['Information Type', informationType], ['Findings', finding],
+      ['Source', source], ['Information Value', informationValue], ['Actionable AY', actionableAy],
+      ['Verification Result Type', verificationResultType], ['Statutory Reason', statutoryReason],
+      ['Income Escaping Assessment Value', incomeEscapingAssessmentValue], ['Verification Information Value', verificationInformationValue]
+    ];
+    const missing = required.find(([, value]) => !value);
+    if (missing) throw new Error(`Invalid CSV data at row ${csvRowNumber}: ${missing[0]} is required.`);
+    if (!/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/.test(pan)) throw new Error(`Invalid PAN at CSV row ${csvRowNumber}.`);
+    if (!/^\d{10}$/.test(mobile)) throw new Error(`Invalid Mobile at CSV row ${csvRowNumber}.`);
+    if (!/^\d{6}$/.test(pinCode)) throw new Error(`Invalid PIN Code at CSV row ${csvRowNumber}.`);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error(`Invalid E-Mail at CSV row ${csvRowNumber}.`);
+
     return {
       serialNo: String(index).padStart(5, '0'),
       caseId: this.makeCaseId(index),
       pan: pan.toUpperCase(),
       name,
-      dobDoi: v(['DOB/DOI', 'DOB', 'Date of Birth']),
-      mobile: v(['Mobile', 'Mobile Number', 'Phone']),
-      email: v(['E-Mail', 'Email', 'E-Mail Address']),
-      pinCode: v(['PIN Code', 'Pincode']),
-      address: v(['Address']),
-      state: v(['State', 'State/UT', 'State UT Code']),
-      verificationStatus: (v(['Verification Status']) || 'Pending') as 'Pending' | 'Completed',
+      dobDoi,
+      mobile,
+      email: email.toLowerCase(),
+      pinCode,
+      address,
+      state,
+      verificationStatus: 'Pending',
       informationDetails: {
-        informationFy: v(['Information FY', 'FY']),
-        informationSourceType: v(['Information Source Type']),
-        informationSourceDescription: v(['Information Source Description']),
-        informationType: v(['Information Type']),
-        informationDescription: v(['Information Description']),
-        informationValue: v(['Information Value']),
-        source: v(['Source']),
-        finding: v(['Finding'])
+        informationFy,
+        informationSourceType: '',
+        informationSourceDescription: '',
+        informationType,
+        informationDescription: description,
+        informationValue,
+        source,
+        finding
       },
       verificationDetails: {
-        actionableAy: v(['Actionable AY']),
-        statutoryReason: v(['Statutory Reason']),
-        verificationResultType: v(['Verification Result Type']),
-        incomeEscapingAssessmentValue: v(['Income Escaping Assessment Value']),
-        informationValue: v(['Verification Information Value']),
-        resultDescription: v(['Verification Result Description'])
+        actionableAy,
+        statutoryReason,
+        verificationResultType,
+        incomeEscapingAssessmentValue,
+        informationValue: verificationInformationValue,
+        resultDescription: ''
       }
     };
-  }
-
-  private parseCsv(text: string): Array<Record<string, string>> {
-    const lines: string[][] = [];
-    let row: string[] = [];
-    let field = '';
-    let quoted = false;
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
-      const next = text[i + 1];
-      if (quoted && ch === '"' && next === '"') { field += '"'; i++; continue; }
-      if (ch === '"') { quoted = !quoted; continue; }
-      if (!quoted && ch === ',') { row.push(field); field = ''; continue; }
-      if (!quoted && (ch === '\n' || ch === '\r')) {
-        if (ch === '\r' && next === '\n') i++;
-        row.push(field); field = '';
-        if (row.some(v => v.trim() !== '')) lines.push(row);
-        row = [];
-        continue;
-      }
-      field += ch;
-    }
-    if (field.length || row.length) { row.push(field); if (row.some(v => v.trim() !== '')) lines.push(row); }
-    if (lines.length < 2) return [];
-    const headers = lines[0].map(h => h.trim());
-    return lines.slice(1).map(values => Object.fromEntries(headers.map((h, i) => [h, values[i] ?? ''])));
   }
 
   private normalHeader(value: string): string {
@@ -764,21 +1163,37 @@ export class AppComponent implements OnInit {
 
   private async restoreLocalDraft(): Promise<void> {
     try {
-      const bundle = await this.drafts.load();
-      if (bundle) {
-        this.lastSavedAt.set(bundle.draft.savedAt);
-      }
+      const summaries = await this.drafts.list();
+      const latest = summaries[0];
+      if (latest) this.lastSavedAt.set(latest.updatedAt);
     } catch {
-      // IndexedDB may be unavailable in restricted/private webviews; the rest of the UI remains usable.
+      // Local storage can be unavailable in browser fallback mode; the UI remains usable.
     }
   }
 
-  private applyDraft(draft: DraftState, files: Record<string, { name: string; type: string; lastModified: number; file: File }> = {}): void {
+  private applyDraft(bundle: LoadedDraftBundle): void {
+    const draft = bundle.draft;
     this.packetForm.patchValue(draft.packet);
     this.rows.set(draft.rows);
-    this.documents.set(draft.documents.map(doc => ({ ...doc, file: files[doc.id]?.file })));
+    this.documents.set(draft.documents.map(doc => {
+      const stored = bundle.files[doc.id];
+      const file = stored
+        ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() })
+        : undefined;
+      return {
+        ...doc,
+        file,
+        fileSize: doc.fileSize ?? stored?.bytes?.length,
+        fileType: doc.fileType ?? stored?.type,
+        lastModified: doc.lastModified ?? stored?.lastModified
+      };
+    }));
+    this.currentDraftId.set(draft.draftId ?? null);
     this.step.set(Math.min(3, Math.max(1, draft.step)));
+    this.packetEditMode.set(false);
+    this.selectedRows.set(new Set());
     this.page.set(1);
+    this.filter.set('');
     this.lastSavedAt.set(draft.savedAt);
   }
 
@@ -788,10 +1203,12 @@ export class AppComponent implements OnInit {
     this.documents.set([]);
     this.selectedRows.set(new Set());
     this.currentRowIndex.set(null);
+    this.currentDraftId.set(null);
     this.page.set(1);
     this.filter.set('');
     this.lastSavedAt.set(null);
     this.progressMessage.set('');
+    this.packetEditMode.set(true);
     this.modal.set('none');
   }
 
@@ -801,7 +1218,10 @@ export class AppComponent implements OnInit {
     window.addEventListener('online', update);
     window.addEventListener('offline', update);
     window.setInterval(async () => {
-      if (!navigator.onLine) { this.isOnline.set(false); return; }
+      if (!navigator.onLine) {
+        this.isOnline.set(false);
+        return;
+      }
       this.isOnline.set(await this.api.health());
     }, 10000);
   }
@@ -812,6 +1232,6 @@ export class AppComponent implements OnInit {
     a.href = url;
     a.download = name;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 }

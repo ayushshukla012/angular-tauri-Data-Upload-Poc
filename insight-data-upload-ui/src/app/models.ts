@@ -1,5 +1,5 @@
 export type UploadStatus = 'PENDING' | 'RECEIVED' | 'VALIDATING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-export type VerificationStatus = 'Pending' | 'Completed';
+export type VerificationStatus = 'Pending' | 'Approved' | 'Completed';
 
 export interface InformationDetails {
   informationFy: string;
@@ -44,7 +44,13 @@ export interface AttachedDocument {
   description: string;
   attachedFor: 'Selected Rows' | 'All Rows';
   rowCaseIds: string[];
+  /** Browser/WebView File object. Kept in memory only; not persisted as business data. */
   file?: File;
+  /** Native filesystem reference used by the Tauri POC to avoid loading every document into memory. */
+  filePath?: string;
+  fileSize?: number;
+  fileType?: string;
+  lastModified?: number;
 }
 
 export interface PacketDetails {
@@ -64,6 +70,29 @@ export interface DraftState {
   packet: PacketDetails;
   rows: PersonRow[];
   documents: Array<Omit<AttachedDocument, 'file'>>;
+  draftId?: string;
+}
+
+export interface SavedDraftSummary {
+  id: string;
+  referenceNumber: string;
+  updatedAt: string;
+  rowCount: number;
+  step: number;
+  filePath?: string;
+}
+
+export interface StoredDraftFile {
+  id: string;
+  name: string;
+  type: string;
+  lastModified: number;
+  bytes: number[];
+}
+
+export interface LoadedDraftBundle {
+  draft: DraftState;
+  files: Record<string, StoredDraftFile>;
 }
 
 export interface ApiError {

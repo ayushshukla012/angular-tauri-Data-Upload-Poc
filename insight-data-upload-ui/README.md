@@ -1,256 +1,291 @@
-# Insight Data Uploads Utility — Angular 22 + Tauri 2
+# Insight Data Uploads Utility — Angular + Tauri 2 + SQLite
 
-This project is a standalone frontend implementation of the Data Upload Module shown in the supplied UI references. It uses Angular 22 for the web UI and Tauri 2 for Windows desktop packaging. The same Angular build can run in a normal browser at `http://localhost:4200` or be packaged as a Windows installer/executable through Tauri.
+This is the updated working UI POC for the Data Uploads Utility. The existing Angular/Tauri UI and backend integration were preserved, and the requested row, draft, CSV and verification-status behaviors were added without implementing new backend business logic.
 
-The UI follows the supplied flow:
+## What was changed
 
-1. New Application / Open Existing File.
-2. Packet Details + submitting-person details.
-3. Person & Verification Details table.
-4. Add Row with Person, Information and Verification accordion sections.
-5. CSV import with sample CSV download.
-6. General Document attachment to all rows or selected rows.
-7. Local draft persistence with IndexedDB and JSON draft import/export.
-8. Final Create Packet flow.
-9. Java Spring Boot API integration for packets/cases.
-10. Direct-to-MinIO presigned upload flow for documents.
+### 1. Open Existing File
+`Open Existing File` now reads the locally saved draft index from SQLite and shows the saved drafts available on the current machine.
 
-## Backend contract used
+Each saved draft can be:
 
-The frontend was built against the API contract supplied in the request and the repository at:
+- Opened and restored into the UI.
+- Deleted from local storage.
+- Identified by reference/file number, row count, saved time and draft id.
 
-`https://github.com/himanshu885986/insight-2.0`
+An `Import exported draft JSON` fallback is still available so existing exported JSON drafts do not stop working.
 
-The backend exposes:
+### 2. Save as Draft — SQLite + File System
+The desktop/Tauri application stores drafts in the application's OS-managed data directory.
 
-- `POST /api/v1/packets`
-- `GET /api/v1/packets/{batchNumber}`
-- `POST /api/v1/cases`
-- `GET /api/v1/cases/{caseId}`
-- `GET /api/v1/cases/{caseId}/documents`
-- `POST /api/v1/uploads/initiate`
-- `POST /api/v1/uploads/{uploadId}/parts/{partNumber}/presign`
-- `GET /api/v1/uploads/{uploadId}/parts`
-- `POST /api/v1/uploads/{uploadId}/complete`
-- `GET /api/v1/uploads/{uploadId}`
+The implementation uses:
 
-The upload service is designed to return a presigned URL and have the client send file bytes directly to MinIO. The backend documentation also describes multipart/resumable upload behavior.
+- **SQLite:** local draft index/state and the required POC local tables.
+- **File System:** draft JSON plus references to user-selected supporting documents. The updated desktop flow avoids copying/reading every supporting file into memory; the original selected path is retained and the file is read one-at-a-time only when the packet is submitted.
 
-## Important integration note: `designation`
+The Tauri app exposes the actual location through the Open Existing File dialog.
 
-The supplied `SubmitCaseRequest` API requires `designation`, while the supplied Add Row screens do not show a designation field. To avoid inventing a new UI field and to keep the reference UI unchanged, the frontend sends a configurable technical fallback from `src/environments/environment.ts`:
+On Windows, because the Tauri application identifier is `com.insight.datauploads.utility`, the directory is under the Windows application-data area for that identifier (typically under `%LOCALAPPDATA%`). The UI displays the resolved path rather than relying on a hardcoded path.
 
-```ts
-defaultCaseDesignation: 'Data Upload Utility'
+Typical structure:
+
+```text
+<app-data>/
+├── data-upload-poc.sqlite3
+└── drafts/
+    └── <draft-id>/
+        └── draft.json
 ```
 
-This is an integration fallback, not a claimed business value. Change it to the value your backend/domain requires before production use.
+Legacy drafts that already contain locally copied document bytes may still contain a `documents/` directory. New drafts prefer storing the user-selected document path in the draft metadata and do not duplicate large files.
 
-## Prerequisites
+> POC note: local draft files may contain user-provided business data. Do not use this local persistence design as the production storage/security boundary. Production credential/secret storage must use an approved secure mechanism.
 
-Angular 22's current compatibility guidance requires Node.js `22.22.3+` for the Angular 22 line. The local environment used while preparing this package has Node.js 22.16.0, so the Angular/Tauri toolchain could not be executed here without upgrading Node. See the official Angular version compatibility table before installing dependencies.
+### 3. Edit button
+The Packet Details `Edit` button now unlocks the packet fields after the screen has been made read-only for the next step. It no longer resets or destroys the entered packet data.
 
-For Tauri 2 on Windows you also need Rust and the Windows build prerequisites. Tauri's documentation recommends the standard `create-tauri-app`/CLI workflow, and production builds use the system WebView2 runtime.
+Row-level editing is also available through the pencil action in the table. Completed rows are locked.
 
-Recommended versions for this POC:
+### 4. Add Row
+The Add Row form now requires all mandatory Person, Information and Verification fields before saving.
 
-- Node.js: 22.22.3 or newer
-- npm: current npm shipped with that Node release
-- Angular: 22.x
-- Rust: current stable Rust toolchain supported by Tauri 2
-- Visual Studio Build Tools: Desktop development with C++
-- WebView2 Runtime: installed on the Windows machine
+Information Details required fields:
 
-## Run the frontend in a browser
+- FY
+- Information Type
+- Findings
+- Source
+- Information Value
 
-From this project folder:
+Verification Details required fields:
+
+- Actionable AY
+- Verification Result Type
+- Statutory Reason
+- Income Escaping Assessment Value
+- Information Value
+
+The bottom actions are now:
+
+- **Cancel** — closes the form without adding/updating the row.
+- **Save** — saves only when the required details are valid.
+
+### 5. General Document
+`General Document` is disabled until at least one row is selected.
+
+The dialog now supports selecting **one or multiple documents at once** for the currently selected row(s). Each selected document becomes its own attached-document record. The selected-row/all-row behavior remains available.
+
+For Tauri desktop mode:
+
+- The native file picker returns the file path and metadata without loading every document into memory.
+- Supporting documents are read one-at-a-time only when the packet is submitted.
+- The existing backend presigned MinIO upload flow is reused; no new backend storage API is invented.
+- Multiple documents can therefore be attached to one row, and the same design can be used across large row sets without keeping every document's bytes resident in Angular memory.
+
+### 6. Verification Status
+The row status arrow/action is now a status dropdown:
+
+- Pending
+- Approved
+- Completed
+
+Rules implemented in the UI:
+
+- New rows start as `Pending`.
+- `Pending` can be changed to `Approved`.
+- Only `Approved` rows can be validated.
+- Select one or more Approved rows and click **Validate** to convert them to `Completed`.
+- Completed rows cannot be edited and their status control is disabled.
+- Pending/Completed rows selected together with Approved rows do not get changed by validation; the user is told to select only Approved rows.
+
+The backend remains responsible for final business validation and acceptance.
+
+### 7. CSV Export
+`Export CSV` exports the exact Add Row input format used by the UI.
+
+The exported format contains:
+
+```text
+PAN
+Name
+DOB/DOI
+Mobile
+E-Mail
+PIN Code
+Address
+State
+FY
+Information Type
+Findings
+Source
+Information Value
+Description
+Actionable AY
+Verification Result Type
+Statutory Reason
+Income Escaping Assessment Value
+Verification Information Value
+```
+
+The Tauri desktop build opens a native save dialog. Browser mode falls back to a normal browser download.
+
+### 8. CSV Import
+`Import CSV` now:
+
+1. Lets the user select a CSV file from the system.
+2. Verifies the header row and required column order.
+3. Streams CSV records from the loaded text instead of first building a complete 2-D CSV array.
+4. Validates required values and the current UX formats for PAN/mobile/email/PIN.
+5. Adds all rows in a single Angular signal update after successful parsing.
+6. Keeps pagination available for large datasets.
+7. Uses compact pagination controls instead of rendering thousands of page buttons.
+8. Yields periodically while processing large imports so the UI can continue to respond.
+
+The current UI file-size ceiling remains **25 MB**, matching the supplied Data Uploads Utility screen. The included `samples/sample-data-100k.csv` is a 100,000-row file designed to fit inside that limit.
+
+Only the current page is rendered in the table; the application does not render 100,000 DOM rows at once.
+
+## 100,000-row performance sample
+
+The ZIP includes:
+
+```text
+samples/sample-data-100k.csv
+```
+
+It contains exactly 100,000 data rows plus the CSV header and uses the same 19-column format expected by `Import CSV`.
+
+It is intentionally kept within the current 25 MB UI file-size limit so it can be selected directly from the application.
+
+The sample can also be regenerated/modified independently; the application does not depend on it at runtime.
+
+## Existing backend integration preserved
+
+The existing Angular API service continues to use the backend contract already present in the project. No new backend endpoint has been invented.
+
+The UI uses the existing upload flow:
+
+```text
+POST /api/v1/packets
+POST /api/v1/cases
+POST /api/v1/uploads/initiate
+PUT presigned upload URL
+POST /api/v1/uploads/{uploadId}/complete
+```
+
+Multipart/resumable upload support already present in the project remains unchanged.
+
+## Tauri commands added/used
+
+The desktop shell now provides:
+
+- `pick_file()` (legacy/single-file command retained)
+- `pick_supporting_documents()` (native multi-document selection)
+- `read_file_bytes()` (reads one selected document only when needed for upload)
+- `save_draft()`
+- `list_drafts()`
+- `load_draft()`
+- `delete_draft()`
+- `get_storage_location()`
+- `save_export_file()`
+- `cleanup_temp_files()`
+- `get_app_version()`
+
+These commands only handle local desktop concerns. They do not implement backend business workflow.
+
+## SQLite POC tables
+
+The Tauri layer initializes the required local POC tables:
+
+- `app_config`
+- `upload_draft`
+- `api_retry_queue`
+
+A small additional `saved_draft` index table is used to make the `Open Existing File` screen practical for multiple saved drafts. It only indexes the local draft files; it is not a business source of truth.
+
+## Browser-only mode
+
+Browser mode remains available with `npm start`.
+
+Because a browser does not have the Tauri local filesystem bridge, `DraftStoreService` uses a local-storage fallback in browser mode. The Windows/Tauri application uses SQLite + File System as requested.
+
+## Setup
+
+### Prerequisites
+
+- Node.js compatible with the Angular version in `package.json`.
+- Rust stable toolchain.
+- Tauri 2 Windows prerequisites.
+- Windows WebView2 runtime for packaged Windows execution.
+
+### Install
 
 ```powershell
 npm install
+```
+
+### Run Angular in browser mode
+
+```powershell
 npm start
 ```
 
-Open:
-
-`http://localhost:4200`
-
-The supplied backend configuration specifically allows `http://localhost:4200` for browser development, so keep that port unless you update the backend CORS configuration.
-
-## Run the backend
-
-The backend repository is the source of truth for the Java services. A minimal local run from the supplied repository is:
+### Run the Tauri desktop application
 
 ```powershell
-cd insight-2.0
-podman-compose up -d postgres kafka minio minio-init
-mvn -pl common-library,protos,upload-service -am install -DskipTests
-mvn -pl upload-service -Dspring-boot.run.fork=false spring-boot:run
-```
-
-The supplied backend configuration uses:
-
-- Postgres: `localhost:5433`
-- Kafka: `localhost:9092`
-- MinIO API: `http://localhost:9000`
-- MinIO console: `http://localhost:9001`
-- Upload service REST API: `http://localhost:8081`
-- Upload service gRPC: `9095`
-- Kafka UI: `http://localhost:8090`
-
-The expected local bucket is `insight-uploads`.
-
-Health check:
-
-```powershell
-curl http://localhost:8081/actuator/health
-```
-
-## Browser CORS
-
-The repository currently hardcodes API CORS to `http://localhost:4200` in `upload-service/src/main/java/com/insight/upload/WebConfig.java`, and the actuator CORS block also allows `http://localhost:4200`.
-
-This project intentionally does not change the backend repository automatically. For browser development, keep the frontend on port 4200.
-
-## Tauri development
-
-After installing the Node dependencies and Rust prerequisites:
-
-```powershell
-npm install
 npm run tauri:dev
 ```
 
-Tauri will start Angular using the `beforeDevCommand` in `src-tauri/tauri.conf.json` and load `http://localhost:4200`.
+### Build Angular
 
-## Package a Windows MSI / EXE installer
+```powershell
+npm run build
+```
 
-Run:
+### Build Windows installer
 
 ```powershell
 npm run tauri:build
 ```
 
-The Tauri configuration requests both Windows NSIS and MSI targets. The output is placed under `src-tauri/target/release/bundle/`.
+## Manual verification performed on the updated source
 
-Typical outputs include:
+The source was manually reviewed after the requested changes and the relevant pure logic was exercised separately for:
 
-- NSIS installer: `src-tauri/target/release/bundle/nsis/*.exe`
-- MSI installer: `src-tauri/target/release/bundle/msi/*.msi`
+- row required-field validation;
+- Pending → Approved → Completed status transitions;
+- completed-row edit protection;
+- selected-row gating for General Document and Validate;
+- exact CSV header validation;
+- CSV quoting/escaping;
+- streamed 100k-row CSV parsing logic;
+- exact CSV header validation;
+- large-row pagination behavior;
+- single signal update after bulk import;
+- one/multiple supporting-document attachment modeling;
+- native document-path preservation and one-at-a-time materialization;
+- draft JSON import structure and SQLite schema creation SQL.
 
-These are installers. The application executable itself is also produced in the Rust release target directory.
+A full Angular browser/Tauri binary build could not be executed in this sandbox because the environment does not provide the complete installed Angular package set and Rust/Cargo toolchain. The package therefore does not claim a binary build was completed here.
 
-## Tauri production CORS requirement
-
-A packaged Tauri app uses a local app origin rather than `http://localhost:4200`. Tauri 2 documents the production custom origin as `http://tauri.localhost` on Windows when the default HTTP scheme is used.
-
-Because the backend's CORS currently permits only `http://localhost:4200`, direct calls from the packaged desktop app will require a backend CORS update.
-
-Use the supplied patch example in:
-
-`docs/TAURI_CORS_PATCH.md`
-
-Do not broaden CORS to `*` for this application.
-
-## File upload architecture
-
-The frontend follows the backend contract instead of posting file bytes through Spring Boot:
-
-1. `POST /api/v1/uploads/initiate`
-2. PUT the file directly to the returned MinIO presigned URL.
-3. `POST /api/v1/uploads/{id}/complete`
-
-For multipart uploads, the frontend uses the server's part-presign endpoints and queries existing parts before continuing.
-
-The backend documentation says the object store is the source of truth for multipart resume state. The local IndexedDB draft is metadata/state for the UI, not the authoritative copy of file bytes.
-
-## Draft behavior
-
-The `Save as Draft` button writes the current packet, row metadata, and document metadata to IndexedDB. The `Open Existing File` dialog supports:
-
-- restoring the last local draft; and
-- opening an exported JSON draft file.
-
-A JSON draft export does not embed document bytes. This is deliberate: document content should stay in local storage or MinIO rather than being copied into a portable JSON record.
-
-## CSV behavior
-
-CSV import supports quoted fields and maps the following families of columns:
-
-- PAN / Source PAN
-- Name
-- DOB/DOI
-- Mobile
-- E-Mail / Email
-- PIN Code / Pincode
-- Address
-- State / State-UT
-- Verification Status
-- Information fields
-- Verification fields
-
-A sample file is available at:
-
-`src/assets/sample-data-upload.csv`
-
-The UI also provides a `Download sample CSV` action directly from the import dialog.
-
-## Documents
-
-The General Document dialog supports:
-
-- Document Type
-- Description
-- file selection
-- All Rows attachment
-- Selected Rows attachment
-- editing/removing the document metadata
-
-When the packet is finally submitted, a document attached to multiple case rows is uploaded once per target case because the supplied backend contract does not expose an endpoint for linking an existing upload to a second case without a new upload.
-
-## Concurrency
-
-Final case submission uses a small concurrency pool (4 workers) so multiple case rows can be submitted and their associated documents uploaded in parallel without starting an unbounded number of requests.
-
-Adjust the concurrency in `createPacket()` only after measuring the real backend/load limits.
-
-## Project structure
+## Files updated for this change set
 
 ```text
-insight-data-upload-ui/
-├─ src/
-│  ├─ app/
-│  │  ├─ app.component.ts
-│  │  ├─ app.component.html
-│  │  ├─ app.component.css
-│  │  ├─ models.ts
-│  │  └─ services/
-│  │     ├─ api.service.ts
-│  │     ├─ draft-store.service.ts
-│  │     └─ toast.service.ts
-│  ├─ assets/sample-data-upload.csv
-│  ├─ environments/environment.ts
-│  ├─ index.html
-│  ├─ main.ts
-│  └─ styles.css
-├─ src-tauri/
-│  ├─ Cargo.toml
-│  ├─ build.rs
-│  ├─ src/main.rs
-│  └─ tauri.conf.json
-├─ angular.json
-├─ package.json
-└─ README.md
+src/app/app.component.ts
+src/app/app.component.html
+src/app/app.component.css
+src/app/models.ts
+src/app/services/draft-store.service.ts
+src-tauri/src/main.rs
+src-tauri/Cargo.toml
+README.md
 ```
 
-## Validation performed in this environment
 
-The package was assembled and statically reviewed against the API contract supplied in the request. GitHub repository contents were also inspected for the backend architecture, offline-upload design, and the current `WebConfig.java` CORS rules.
+## Latest functional fixes
 
-A full Angular/Tauri build could not be executed in this sandbox because:
-
-- Node.js is `22.16.0`, below the current Angular 22 compatibility floor of `22.22.3`; and
-- Rust/Cargo are not installed in the sandbox.
-
-Therefore this package is not being presented as a fully binary-tested Angular/Tauri build. Install the current prerequisites above, run `npm install`, then `npm run build` and `npm run tauri:build` on the target Windows development machine.
-
-A synthetic supporting document for exercising the attachment UI is also provided at `src/assets/sample-supporting-document.txt`.
+- `Save as Draft` invokes the Tauri `save_draft` command with the required outer `request` argument and preserves the existing SQLite + File System storage design.
+- Tauri direct command arguments use the required camelCase keys (`draftId`, `suggestedName`) for load/delete/export operations.
+- CSV export falls back to the WebView/browser download path if the native save dialog is unavailable; the user is never blocked by a native-dialog-only failure.
+- Verification Status UI exposes only `Pending` and `Approved` as selectable values. `Completed` is shown as a locked state after validation.
+- Completed rows cannot be selected and cannot be edited, deleted, validated, or used for General Document actions.

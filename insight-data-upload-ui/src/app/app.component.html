@@ -59,7 +59,7 @@
             <span class="choice-icon file">▣</span>
             <span><strong>Open Existing File</strong><small>Import a previously saved draft from your local system to continue your work.</small><em>Open File <span>›</span></em></span>
           </button>
-          <button class="instructions-link" type="button" (click)="downloadSampleCsv()">View Instructions <span>›</span></button>
+          <button class="instructions-link" type="button" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">View Instructions <span>›</span></button>
         </div>
       </section>
     </main>
@@ -68,27 +68,27 @@
       <section class="panel packet-panel">
         <div class="panel-heading">
           <div><h1>Packet Details</h1><p>Capture case packet information before adding information records and documents.</p></div>
-          <button class="outline small" type="button" (click)="packetForm.reset()">Edit</button>
+          <button class="outline small" type="button" (click)="editPacket()">Edit</button>
         </div>
         <div class="mandatory-note">ⓘ All mandatory fields marked with <b>*</b> must be completed before proceeding.</div>
 
         <div class="section-title">Report Details</div>
         <div class="form-grid one">
-          <label>Report Type <span>*</span><select [formControl]="packetForm.controls.reportType"><option value="">Select type</option><option *ngFor="let t of reportTypes" [value]="t">{{t}}</option></select></label>
+          <label>Report Type <span>*</span><select [disabled]="!packetEditMode()" [formControl]="packetForm.controls.reportType"><option value="">Select type</option><option *ngFor="let t of reportTypes" [value]="t">{{t}}</option></select></label>
         </div>
 
         <div class="section-title">Basic Details</div>
         <div class="form-grid">
-          <label>Reference Number/File Number <span>*</span><input [formControl]="packetForm.controls.referenceNumber" placeholder="Enter number"></label>
-          <label class="wide">Description of Information <span>*</span><textarea maxlength="2000" [formControl]="packetForm.controls.description" placeholder="Enter description"></textarea><small class="counter">{{packetForm.controls.description.value?.length || 0}}/2000</small></label>
+          <label>Reference Number/File Number <span>*</span><input [disabled]="!packetEditMode()" [formControl]="packetForm.controls.referenceNumber" placeholder="Enter number"></label>
+          <label class="wide">Description of Information <span>*</span><textarea [disabled]="!packetEditMode()" maxlength="2000" [formControl]="packetForm.controls.description" placeholder="Enter description"></textarea><small class="counter">{{packetForm.controls.description.value?.length || 0}}/2000</small></label>
         </div>
 
         <div class="section-title">Submitting Person Details</div>
         <div class="form-grid three">
-          <label>Name <span>*</span><input [formControl]="packetForm.controls.submittingPersonName" placeholder="Enter name"></label>
-          <label>Mobile Number <span>*</span><input inputmode="numeric" maxlength="10" [formControl]="packetForm.controls.submittingPersonMobile" placeholder="Enter mobile number"></label>
-          <label>Email <span>*</span><input [formControl]="packetForm.controls.submittingPersonEmail" placeholder="Enter email"></label>
-          <label>Address <span>*</span><input [formControl]="packetForm.controls.submittingPersonAddress" placeholder="Enter address"></label>
+          <label>Name <span>*</span><input [disabled]="!packetEditMode()" [formControl]="packetForm.controls.submittingPersonName" placeholder="Enter name"></label>
+          <label>Mobile Number <span>*</span><input [disabled]="!packetEditMode()" inputmode="numeric" maxlength="10" [formControl]="packetForm.controls.submittingPersonMobile" placeholder="Enter mobile number"></label>
+          <label>Email <span>*</span><input [disabled]="!packetEditMode()" [formControl]="packetForm.controls.submittingPersonEmail" placeholder="Enter email"></label>
+          <label>Address <span>*</span><input [disabled]="!packetEditMode()" [formControl]="packetForm.controls.submittingPersonAddress" placeholder="Enter address"></label>
         </div>
 
         <div class="footer-actions">
@@ -108,9 +108,9 @@
 
         <div class="toolbar">
           <div class="toolbar-left">
-            <button class="outline" type="button" (click)="openGeneralDocument()">▧ General Document</button>
-            <button class="outline" type="button" [disabled]="selectedRows().size === 0" (click)="deleteSelected()">▢ Delete</button>
-            <button class="outline" type="button" (click)="validateRows()">◉ Validate</button>
+            <button class="outline" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">📄 General Document</button>
+            <button class="outline" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="deleteSelected()">▢ Delete</button>
+            <button class="outline" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="validateRows()">✓ Validate</button>
           </div>
           <div class="toolbar-right">
             <button class="outline" type="button" (click)="exportCsv()">⇩ Export CSV</button>
@@ -128,28 +128,42 @@
               </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of pagedRows; let i = index">
-                <td><input type="checkbox" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
-                <td>{{row.serialNo}}</td><td class="mono">{{row.pan}}</td><td>{{row.name}}</td><td>{{row.dobDoi}}</td><td>{{row.address}}</td><td>{{row.state}}</td><td>{{row.pinCode}}</td><td class="truncate" [title]="row.email">{{row.email}}</td><td>{{documents().filter(d => d.rowCaseIds.includes(row.caseId)).length}}</td>
-                <td><span class="status-chip" [class.completed]="row.verificationStatus === 'Completed'"><span class="dot"></span>{{row.verificationStatus === 'Completed' ? 'Completed' : 'Pending'}}</span></td>
-                <td><button class="kebab" type="button" (click)="editRow(rows().indexOf(row))">⌄</button></td>
+              <tr *ngFor="let row of pagedRows(); let i = index">
+                <td><input type="checkbox" [disabled]="row.verificationStatus === 'Completed'" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
+                <td>{{row.serialNo}}</td><td class="mono">{{row.pan}}</td><td>{{row.name}}</td><td>{{row.dobDoi}}</td><td>{{row.address}}</td><td>{{row.state}}</td><td>{{row.pinCode}}</td><td class="truncate" [title]="row.email">{{row.email}}</td><td>{{documentCountByCaseId().get(row.caseId) || 0}}</td>
+                <td>
+                  <select *ngIf="row.verificationStatus !== 'Completed'; else completedStatus"
+                          class="status-select"
+                          [value]="row.verificationStatus"
+                          (change)="setRowVerificationStatus(row, $any($event.target).value)">
+                    <option value="Pending">Pending</option>
+                    <option value="Approved">Approved</option>
+                  </select>
+                  <ng-template #completedStatus><span class="status-select completed-status">Completed</span></ng-template>
+                </td>
+                <td class="row-actions">
+                  <button class="icon-btn" type="button" [disabled]="row.verificationStatus === 'Completed'" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(rows().indexOf(row))">✎</button>
+                </td>
               </tr>
-              <tr *ngIf="pagedRows.length === 0"><td colspan="12" class="empty">No records found. Add a row or import a CSV.</td></tr>
+              <tr *ngIf="pagedRows().length === 0"><td colspan="12" class="empty">No records found. Add a row or import a CSV.</td></tr>
             </tbody>
           </table>
         </div>
 
         <div class="documents-summary" *ngIf="documents().length">
           <div><strong>General documents</strong><span>{{documents().length}} attached document(s)</span></div>
-          <button class="link-button" type="button" (click)="openGeneralDocument()">Manage documents</button>
+          <button class="link-button" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">Manage documents</button>
         </div>
 
         <div class="pagination">
-          <button type="button" [disabled]="page() === 1" (click)="setPage(page() - 1)">‹</button>
-          <button type="button" *ngFor="let p of [].constructor(pageCount); let i = index" [class.active-page]="page() === i + 1" (click)="setPage(i + 1)">{{i + 1}}</button>
-          <button type="button" [disabled]="page() === pageCount" (click)="setPage(page() + 1)">›</button>
-          <span>Showing {{pagedRows.length}} of {{filteredRows.length}} items</span>
-          <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option value="10">10</option><option value="25">25</option><option value="50">50</option></select>
+          <button type="button" [disabled]="page() === 1" (click)="setPage(page() - 1)" aria-label="Previous page">‹</button>
+          <ng-container *ngFor="let p of pageNumbers()">
+            <span *ngIf="p === '…'" class="page-ellipsis">…</span>
+            <button *ngIf="p !== '…'" type="button" [class.active-page]="page() === p" (click)="setPage(p)">{{p}}</button>
+          </ng-container>
+          <button type="button" [disabled]="page() === pageCount()" (click)="setPage(page() + 1)" aria-label="Next page">›</button>
+          <span>Showing {{pagedRows().length}} of {{filteredRows().length}} items</span>
+          <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
         </div>
 
         <div class="footer-actions">
@@ -226,8 +240,7 @@
                 </select>
               </label>
             </div>
-            <div class="radio-line"><span>Verification Status <b>*</b></span><label><input type="radio" value="Pending" [formControl]="rowForm.controls.verificationStatus"> Pending</label><label><input type="radio" value="Completed" [formControl]="rowForm.controls.verificationStatus"> Completed</label></div>
-            <div class="modal-row-actions"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" (click)="saveRow()">Save</button></div>
+
           </div>
         </div>
 
@@ -238,7 +251,7 @@
               <label>FY <span>*</span><select [formControl]="rowForm.controls.informationFy"><option value="">Select year</option><option *ngFor="let y of years" [value]="y">{{y}}</option></select></label>
               <label>Information Type <span>*</span><select [formControl]="rowForm.controls.informationType"><option value="">Select information type</option><option *ngFor="let t of informationTypes" [value]="t">{{t}}</option></select></label>
               <label>Findings <span>*</span><select [formControl]="rowForm.controls.finding"><option value="">Select finding</option><option *ngFor="let f of findings" [value]="f">{{f}}</option></select></label>
-              <label>Source <span>*</span><select [formControl]="rowForm.controls.informationSourceType"><option value="">Select source</option><option *ngFor="let s of sourceTypes" [value]="s">{{s}}</option></select></label>
+              <label>Source <span>*</span><select [formControl]="rowForm.controls.source"><option value="">Select source</option><option *ngFor="let s of sourceTypes" [value]="s">{{s}}</option></select></label>
               <label class="wide">Value <span>*</span><input [formControl]="rowForm.controls.informationValue" placeholder="Enter value"></label>
               <label class="wide">Description <input [formControl]="rowForm.controls.informationDescription" placeholder="Enter description"></label>
             </div>
@@ -258,7 +271,7 @@
           </div>
         </div>
       </div>
-      <div class="modal-footer"><button class="primary" type="button" (click)="saveRow()">Add Row</button></div>
+      <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" (click)="saveRow()">Save</button></div>
     </section>
   </div>
 
@@ -268,7 +281,7 @@
       <div class="modal-header"><h2>Import CSV</h2><button type="button" (click)="closeModal()">×</button></div>
       <div class="modal-body center-drop" (dragover)="onDragOver($event)" (drop)="handleCsvDrop($event)">
         <input #csvFileInput id="csvFileInput" type="file" accept=".csv,text/csv" class="visually-hidden" (change)="handleCsvSelection($event)">
-        <div class="upload-picker" role="button" tabindex="0" (click)="csvFileInput.click()" (keydown.enter)="csvFileInput.click()" (keydown.space)="$event.preventDefault(); csvFileInput.click()">
+        <div class="upload-picker" role="button" tabindex="0" (click)="browseForCsv(csvFileInput)" (keydown.enter)="browseForCsv(csvFileInput)" (keydown.space)="$event.preventDefault(); browseForCsv(csvFileInput)">
           <div class="upload-icon">☁</div>
           <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
           <small>Maximum allowed file size: 25 MB.</small>
@@ -277,9 +290,10 @@
           <span>✓</span>{{csvFile()?.name}}
           <button type="button" (click)="csvFile.set(null)">✕</button>
         </div>
-        <button class="sample-link" type="button" (click)="downloadSampleCsv()">Download sample CSV</button>
+        <button class="sample-link" type="button" (click)="browseForCsv(csvFileInput)">📋 Load Sample CSV</button>
       </div>
-      <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" [disabled]="importBusy()" (click)="importCsv()">{{importBusy() ? 'Importing…' : 'Save'}}</button></div>
+      <div class="csv-progress" *ngIf="csvImportProgress()">{{csvImportProgress()}}</div>
+      <div class="modal-footer"><button class="outline" type="button" [disabled]="importBusy()" (click)="closeModal()">Cancel</button><button class="primary" type="button" [disabled]="importBusy()" (click)="importCsv()">{{importBusy() ? 'Importing…' : 'Load CSV'}}</button></div>
     </section>
   </div>
 
@@ -292,13 +306,18 @@
           <label>Document Type <span>*</span><select [value]="documentType()" (change)="documentType.set($any($event.target).value)"><option>Verification Type</option><option>Evidence</option><option>Supporting Document</option><option>Other</option></select></label>
           <label>Description <span>*</span><input [value]="documentDescription()" (input)="documentDescription.set($any($event.target).value)" placeholder="Enter description"></label>
         </div>
-        <input #docFileInput id="docFileInput" type="file" class="visually-hidden" (change)="handleDocumentSelection($event)">
-        <div class="drop-area upload-picker" role="button" tabindex="0" (click)="browseForDocument(docFileInput)" (keydown.enter)="browseForDocument(docFileInput)" (keydown.space)="$event.preventDefault(); browseForDocument(docFileInput)" (dragover)="onDragOver($event)" (drop)="handleDocumentDrop($event)">
+        <input #docFileInput id="docFileInput" type="file" multiple class="visually-hidden" (change)="handleDocumentSelection($event)">
+        <div class="drop-area upload-picker" role="button" tabindex="0" (click)="browseForDocuments(docFileInput)" (keydown.enter)="browseForDocuments(docFileInput)" (keydown.space)="$event.preventDefault(); browseForDocuments(docFileInput)" (dragover)="onDragOver($event)" (drop)="handleDocumentDrop($event)">
           <div class="upload-icon">☁</div>
           <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
           <small>Maximum allowed file size: 25 MB.</small>
         </div>
-        <div *ngIf="generalDocumentFile()" class="file-pill"><span>✓</span>{{generalDocumentFile()?.name}}<button type="button" (click)="generalDocumentFile.set(null)">✕</button></div>
+        <div *ngIf="generalDocumentFiles().length" class="selected-files-list">
+          <div class="file-pill" *ngFor="let selected of generalDocumentFiles()">
+            <span>✓</span>{{selected.file.name}}
+            <small>{{(selected.fileSize / 1024 / 1024).toFixed(2)}} MB</small>
+          </div>
+        </div>
         <div class="attach-choice"><label><input type="radio" [checked]="attachedForAll()" (change)="attachedForAll.set(true)"> All Rows</label><label><input type="radio" [checked]="!attachedForAll()" [disabled]="selectedRows().size === 0" (change)="attachedForAll.set(false)"> Selected Rows ({{selectedRows().size}})</label></div>
         <div class="doc-preview" *ngIf="documents().length">
           <table><thead><tr><th>Sr. No.</th><th>Document Name</th><th>Document Type</th><th>Description</th><th>Document attached for</th><th></th></tr></thead><tbody><tr *ngFor="let doc of documents(); let i = index"><td>{{i+1}}</td><td class="link-text">{{doc.fileName}}</td><td>{{doc.docType}}</td><td>{{doc.description}}</td><td>{{doc.attachedFor}}</td><td><button type="button" class="icon-btn" (click)="editDocument(doc)">✎</button><button type="button" class="icon-btn danger" (click)="removeDocument(doc.id)">▥</button></td></tr></tbody></table>
@@ -310,17 +329,27 @@
 
   <!-- Open existing modal -->
   <div class="modal-backdrop" *ngIf="modal() === 'openFile'" (click)="$event.target === $event.currentTarget && closeModal()">
-    <section class="modal medium" role="dialog" aria-modal="true">
+    <section class="modal large" role="dialog" aria-modal="true" aria-label="Open Existing File">
       <div class="modal-header"><h2>Open Existing File</h2><button type="button" (click)="closeModal()">×</button></div>
-      <div class="modal-body center-drop" (dragover)="onDragOver($event)" (drop)="handleDraftDrop($event)">
-        <input #draftFileInput id="draftFileInput" type="file" class="visually-hidden" accept="application/json,.json" (change)="handleDraftFile($event)">
-        <div class="open-card upload-picker" role="button" tabindex="0" (click)="draftFileInput.click()" (keydown.enter)="draftFileInput.click()" (keydown.space)="$event.preventDefault(); draftFileInput.click()">
-          <div class="upload-icon">▣</div>
-          <strong>Select a saved draft JSON file</strong>
-          <p>Continue where you left off. Draft metadata is stored locally; documents remain on the current device unless reattached.</p>
-          <span class="browse-button">Browse</span>
+      <div class="modal-body open-drafts-body">
+        <div class="storage-location" *ngIf="storageLocation()"><strong>Saved draft location:</strong><span>{{storageLocation()}}</span></div>
+        <div *ngIf="savedDrafts().length; else noDrafts" class="draft-list">
+          <div class="draft-list-header"><span>Reference Number / File Number</span><span>Rows</span><span>Last Saved</span><span>Action</span></div>
+          <div class="draft-list-row" *ngFor="let draft of savedDrafts()">
+            <div><strong>{{draft.referenceNumber || 'Untitled Draft'}}</strong><small>{{draft.id}}</small></div>
+            <span>{{draft.rowCount.toLocaleString()}}</span>
+            <span>{{draft.updatedAt}}</span>
+            <div class="draft-actions"><button class="outline small" type="button" [disabled]="openDraftBusy()" (click)="openSavedDraft(draft.id)">Open</button><button class="icon-btn danger" type="button" (click)="deleteSavedDraft(draft.id)" aria-label="Delete draft">🗑</button></div>
+          </div>
         </div>
-        <button class="link-button" type="button" (click)="loadDraftFromBrowser()">Restore last local draft</button>
+        <ng-template #noDrafts>
+          <div class="empty-drafts"><strong>No saved drafts found.</strong><p>Use <b>Save as Draft</b> from the Packet Details or Person &amp; Verification Details screen. Drafts are stored locally on this device.</p></div>
+        </ng-template>
+        <div class="draft-import-area">
+          <input #draftFileInput id="draftFileInput" type="file" class="visually-hidden" accept="application/json,.json" (change)="handleDraftFile($event)">
+          <button class="link-button" type="button" (click)="draftFileInput.click()">Import exported draft JSON</button>
+          <button class="link-button" type="button" [disabled]="!rows().length && !packetForm.value.referenceNumber" (click)="exportDraftFile()">Export current draft JSON</button>
+        </div>
       </div>
       <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button></div>
     </section>
