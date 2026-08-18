@@ -1,13 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use rusqlite::{params, Connection};
+use csv::StringRecord;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024;
+const DEFAULT_PAGE_SIZE: i64 = 25;
 
 #[derive(Debug, Serialize)]
 struct PickedFile {
@@ -80,6 +83,50 @@ struct StoredDraftFileResponse {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct NativeInformationDetails {
+    information_fy: String, information_source_type: String, information_source_description: String, information_type: String,
+    information_description: String, information_value: String, source: String, finding: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeInformationDetailsInput {
+    information_fy: String, information_source_type: String, information_source_description: String, information_type: String,
+    information_description: String, information_value: String, source: String, finding: String,
+}
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct NativeVerificationDetails {
+    actionable_ay: String, statutory_reason: String, verification_result_type: String, income_escaping_assessment_value: String, information_value: String, result_description: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeVerificationDetailsInput {
+    actionable_ay: String, statutory_reason: String, verification_result_type: String, income_escaping_assessment_value: String, information_value: String, result_description: String,
+}
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct NativePersonRow {
+    serial_no: String, case_id: String, pan: String, name: String, dob_doi: String, mobile: String, email: String, pin_code: String, address: String, state: String,
+    verification_status: String, information_details: NativeInformationDetails, verification_details: NativeVerificationDetails,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativePersonRowInput {
+    serial_no: String, case_id: String, pan: String, name: String, dob_doi: String, mobile: String, email: String, pin_code: String, address: String, state: String,
+    verification_status: String, information_details: NativeInformationDetailsInput, verification_details: NativeVerificationDetailsInput,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CsvImportResult { imported_count: usize, total_count: usize }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PagedRows { rows: Vec<NativePersonRow>, total_count: usize }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedCsvFile { file_name: String, file_path: String, file_size: u64 }
+
 fn storage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let root = app
         .path()
@@ -92,6 +139,115 @@ fn storage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(storage_root(app)?.join("data-upload-poc.sqlite3"))
+}
+
+fn ensure_imported_rows_columns(conn: &Connection) -> Result<(), String> {
+    let mut existing = std::collections::HashSet::new();
+    let mut stmt = conn.prepare("PRAGMA table_info(imported_rows)").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
+    for column in rows {
+        existing.insert(column.map_err(|e| e.to_string())?);
+    }
+
+    // Existing installations can have an older SQLite database created by a previous POC build.
+    // SQLite's CREATE TABLE IF NOT EXISTS does not alter such a table, so add only the columns
+    // required by the current row-store implementation.
+    let required: &[(&str, &str)] = &[
+        ("dataset_id", "TEXT NOT NULL DEFAULT ''"),
+        ("serial_no", "TEXT NOT NULL DEFAULT ''"),
+        ("case_id", "TEXT NOT NULL DEFAULT ''"),
+        ("pan", "TEXT NOT NULL DEFAULT ''"),
+        ("name", "TEXT NOT NULL DEFAULT ''"),
+        ("dob_doi", "TEXT NOT NULL DEFAULT ''"),
+        ("mobile", "TEXT NOT NULL DEFAULT ''"),
+        ("email", "TEXT NOT NULL DEFAULT ''"),
+        ("pin_code", "TEXT NOT NULL DEFAULT ''"),
+        ("address", "TEXT NOT NULL DEFAULT ''"),
+        ("state", "TEXT NOT NULL DEFAULT ''"),
+        ("verification_status", "TEXT NOT NULL DEFAULT 'Pending'"),
+        ("information_fy", "TEXT NOT NULL DEFAULT ''"),
+        ("information_source_type", "TEXT NOT NULL DEFAULT ''"),
+        ("information_source_description", "TEXT NOT NULL DEFAULT ''"),
+        ("information_type", "TEXT NOT NULL DEFAULT ''"),
+        ("information_description", "TEXT NOT NULL DEFAULT ''"),
+        ("information_value", "TEXT NOT NULL DEFAULT ''"),
+        ("source", "TEXT NOT NULL DEFAULT ''"),
+        ("finding", "TEXT NOT NULL DEFAULT ''"),
+        ("actionable_ay", "TEXT NOT NULL DEFAULT ''"),
+        ("statutory_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("verification_result_type", "TEXT NOT NULL DEFAULT ''"),
+        ("income_escaping_assessment_value", "TEXT NOT NULL DEFAULT ''"),
+        ("verification_information_value", "TEXT NOT NULL DEFAULT ''"),
+        ("result_description", "TEXT NOT NULL DEFAULT ''"),
+    ];
+    for (column, definition) in required {
+        if !existing.contains(*column) {
+            conn.execute(&format!("ALTER TABLE imported_rows ADD COLUMN {column} {definition}"), [])
+                .map_err(|e| format!("Unable to migrate local row store column {column}: {e}"))?;
+        }
+    }
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_serial ON imported_rows(dataset_id, serial_no)", [])
+        .map_err(|e| e.to_string())?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_pan ON imported_rows(dataset_id, pan)", [])
+        .map_err(|e| e.to_string())?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_name ON imported_rows(dataset_id, name)", [])
+        .map_err(|e| e.to_string())?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_email ON imported_rows(dataset_id, email)", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn ensure_metadata_columns(conn: &Connection) -> Result<(), String> {
+    // Older POC installations may already have these tables with a smaller schema.
+    // CREATE TABLE IF NOT EXISTS does not add missing columns, so close/save must
+    // explicitly migrate the metadata tables too.
+    let migrations: &[(&str, &[(&str, &str)])] = &[
+        ("upload_draft", &[
+            ("upload_type", "TEXT"),
+            ("local_status", "TEXT"),
+            ("financial_year", "TEXT"),
+            ("information_type", "TEXT"),
+            ("category", "TEXT"),
+            ("sensitivity", "TEXT"),
+            ("pan", "TEXT"),
+            ("tan", "TEXT"),
+            ("itdrein", "TEXT"),
+            ("remarks", "TEXT"),
+            ("selected_file_name", "TEXT"),
+            ("selected_file_path", "TEXT"),
+            ("selected_file_size", "INTEGER"),
+            ("backend_upload_id", "TEXT"),
+            ("backend_status", "TEXT"),
+            ("acknowledgement_id", "TEXT"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+        ]),
+        ("saved_draft", &[
+            ("file_path", "TEXT"),
+            ("reference_number", "TEXT"),
+            ("row_count", "INTEGER"),
+            ("step", "INTEGER"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+        ]),
+    ];
+
+    for (table, columns) in migrations {
+        let mut existing = std::collections::HashSet::new();
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
+        for column in rows {
+            existing.insert(column.map_err(|e| e.to_string())?);
+        }
+        for (column, definition) in *columns {
+            if !existing.contains(*column) {
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])
+                    .map_err(|e| format!("Unable to migrate local {table} column {column}: {e}"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn connection(app: &tauri::AppHandle) -> Result<Connection, String> {
@@ -145,9 +301,20 @@ fn connection(app: &tauri::AppHandle) -> Result<Connection, String> {
            step INTEGER NOT NULL,
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS imported_rows (
+           dataset_id TEXT NOT NULL, serial_no TEXT NOT NULL, case_id TEXT NOT NULL, pan TEXT NOT NULL, name TEXT NOT NULL, dob_doi TEXT NOT NULL, mobile TEXT NOT NULL, email TEXT NOT NULL, pin_code TEXT NOT NULL, address TEXT NOT NULL, state TEXT NOT NULL, verification_status TEXT NOT NULL,
+           information_fy TEXT NOT NULL, information_source_type TEXT NOT NULL, information_source_description TEXT NOT NULL, information_type TEXT NOT NULL, information_description TEXT NOT NULL, information_value TEXT NOT NULL, source TEXT NOT NULL, finding TEXT NOT NULL, actionable_ay TEXT NOT NULL, statutory_reason TEXT NOT NULL, verification_result_type TEXT NOT NULL, income_escaping_assessment_value TEXT NOT NULL, verification_information_value TEXT NOT NULL, result_description TEXT NOT NULL,
+           PRIMARY KEY(dataset_id, case_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_serial ON imported_rows(dataset_id, serial_no);
+         CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_pan ON imported_rows(dataset_id, pan);
+         CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_name ON imported_rows(dataset_id, name);
+         CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_email ON imported_rows(dataset_id, email);",
     )
     .map_err(|e| format!("Unable to initialize SQLite schema: {e}"))?;
+    ensure_imported_rows_columns(&conn)?;
+    ensure_metadata_columns(&conn)?;
     Ok(conn)
 }
 
@@ -257,108 +424,173 @@ fn read_file_bytes(file_path: String) -> Result<Vec<u8>, String> {
 }
 
 
-#[tauri::command]
-fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedDraftSummary, String> {
-    let root = storage_root(&app)?;
+fn clear_dataset(conn: &Connection, dataset_id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM imported_rows WHERE dataset_id=?1", params![dataset_id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+const ROW_SELECT: &str = "SELECT serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description FROM imported_rows";
+
+fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<NativePersonRow> {
+    Ok(NativePersonRow {
+        serial_no: row.get(0)?, case_id: row.get(1)?, pan: row.get(2)?, name: row.get(3)?, dob_doi: row.get(4)?, mobile: row.get(5)?, email: row.get(6)?, pin_code: row.get(7)?, address: row.get(8)?, state: row.get(9)?, verification_status: row.get(10)?,
+        information_details: NativeInformationDetails { information_fy: row.get(11)?, information_source_type: row.get(12)?, information_source_description: row.get(13)?, information_type: row.get(14)?, information_description: row.get(15)?, information_value: row.get(16)?, source: row.get(17)?, finding: row.get(18)? },
+        verification_details: NativeVerificationDetails { actionable_ay: row.get(19)?, statutory_reason: row.get(20)?, verification_result_type: row.get(21)?, income_escaping_assessment_value: row.get(22)?, information_value: row.get(23)?, result_description: row.get(24)? },
+    })
+}
+
+fn execute_upsert(conn: &Connection, dataset_id: &str, row: &NativePersonRowInput) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO imported_rows(dataset_id,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
+        params![dataset_id,row.serial_no,row.case_id,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,row.address,row.state,row.verification_status,row.information_details.information_fy,row.information_details.information_source_type,row.information_details.information_source_description,row.information_details.information_type,row.information_details.information_description,row.information_details.information_value,row.information_details.source,row.information_details.finding,row.verification_details.actionable_ay,row.verification_details.statutory_reason,row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,row.verification_details.information_value,row.verification_details.result_description],
+    ).map_err(|e| format!("Unable to save row: {e}"))?;
+    Ok(())
+}
+
+fn execute_upsert_tx(tx: &rusqlite::Transaction<'_>, dataset_id: &str, row: &NativePersonRowInput) -> Result<(), String> {
+    tx.execute(
+        "INSERT OR REPLACE INTO imported_rows(dataset_id,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
+        params![dataset_id,row.serial_no,row.case_id,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,row.address,row.state,row.verification_status,row.information_details.information_fy,row.information_details.information_source_type,row.information_details.information_source_description,row.information_details.information_type,row.information_details.information_description,row.information_details.information_value,row.information_details.source,row.information_details.finding,row.verification_details.actionable_ay,row.verification_details.statutory_reason,row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,row.verification_details.information_value,row.verification_details.result_description],
+    ).map_err(|e| format!("Unable to save row: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn pick_csv_file() -> Result<Option<PickedCsvFile>, String> {
+    let Some(path) = rfd::FileDialog::new().set_title("Select CSV file").add_filter("CSV files", &["csv"]).pick_file() else { return Ok(None); };
+    let metadata = fs::metadata(&path).map_err(|e| format!("Unable to access selected CSV: {e}"))?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| "The selected CSV has an invalid name.".to_string())?.to_string();
+    Ok(Some(PickedCsvFile { file_name, file_path: path.to_string_lossy().to_string(), file_size: metadata.len() }))
+}
+
+fn record_value(record: &StringRecord, index: usize) -> String { record.get(index).unwrap_or("").trim().to_string() }
+
+fn validate_and_map_record(record: &StringRecord, row_number: usize, dataset_index: usize, reference: &str) -> Result<NativePersonRowInput, String> {
+    if record.len() != 19 { return Err(format!("Invalid CSV data at row {row_number}: expected 19 columns but found {}.", record.len())); }
+    let pan=record_value(record,0); let name=record_value(record,1); let dob_doi=record_value(record,2); let mobile=record_value(record,3); let email=record_value(record,4); let pin_code=record_value(record,5);
+    let required=[("PAN",pan.as_str()),("Name",name.as_str()),("DOB/DOI",dob_doi.as_str()),("Mobile",mobile.as_str()),("E-Mail",email.as_str()),("PIN Code",pin_code.as_str()),("Address",record.get(6).unwrap_or("")),("State",record.get(7).unwrap_or("")),("FY",record.get(8).unwrap_or("")),("Information Type",record.get(9).unwrap_or("")),("Findings",record.get(10).unwrap_or("")),("Source",record.get(11).unwrap_or("")),("Information Value",record.get(12).unwrap_or("")),("Actionable AY",record.get(14).unwrap_or("")),("Verification Result Type",record.get(15).unwrap_or("")),("Statutory Reason",record.get(16).unwrap_or("")),("Income Escaping Assessment Value",record.get(17).unwrap_or("")),("Verification Information Value",record.get(18).unwrap_or(""))];
+    if let Some((field,_))=required.iter().find(|(_,v)|v.trim().is_empty()){return Err(format!("Invalid CSV data at row {row_number}: {field} is required."));}
+    let pan_chars: Vec<char>=pan.chars().collect(); if pan_chars.len()!=10 || !pan_chars[..5].iter().all(|c|c.is_ascii_alphabetic()) || !pan_chars[5..9].iter().all(|c|c.is_ascii_digit()) || !pan_chars[9..10].iter().all(|c|c.is_ascii_alphabetic()){return Err(format!("Invalid PAN at CSV row {row_number}."));}
+    if mobile.len()!=10 || !mobile.chars().all(|c|c.is_ascii_digit()){return Err(format!("Invalid Mobile at CSV row {row_number}."));}
+    if pin_code.len()!=6 || !pin_code.chars().all(|c|c.is_ascii_digit()){return Err(format!("Invalid PIN Code at CSV row {row_number}."));}
+    if !email.contains('@') || !email.contains('.') { return Err(format!("Invalid E-Mail at CSV row {row_number}.")); }
+    let index=dataset_index.max(1); let reference=if reference.trim().is_empty(){"LOCAL"}else{reference.trim()};
+    Ok(NativePersonRowInput{serial_no:format!("{:05}",index),case_id:format!("{}-{:05}",reference,index),pan:pan.to_ascii_uppercase(),name,dob_doi,mobile,email:email.to_ascii_lowercase(),pin_code,address:record_value(record,6),state:record_value(record,7),verification_status:"Pending".to_string(),information_details:NativeInformationDetailsInput{information_fy:record_value(record,8),information_source_type:String::new(),information_source_description:String::new(),information_type:record_value(record,9),information_description:record_value(record,13),information_value:record_value(record,12),source:record_value(record,11),finding:record_value(record,10)},verification_details:NativeVerificationDetailsInput{actionable_ay:record_value(record,14),statutory_reason:record_value(record,16),verification_result_type:record_value(record,15),income_escaping_assessment_value:record_value(record,17),information_value:record_value(record,18),result_description:String::new()}})
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn import_csv_to_store(app: tauri::AppHandle, dataset_id: String, file_path: String, reference_number: String) -> Result<CsvImportResult, String> {
     let conn = connection(&app)?;
+    let temp_id = format!("csv-import-{}", uuid_like());
 
-    let draft: Value = serde_json::from_str(&request.draft_json)
-        .map_err(|e| format!("Invalid draft JSON: {e}"))?;
-    let version = draft.get("version").and_then(Value::as_i64).unwrap_or_default();
-    if version != 1 {
-        return Err("Unsupported draft version.".to_string());
-    }
-    let reference_number = draft
-        .get("packet")
-        .and_then(|p| p.get("referenceNumber"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let step = draft.get("step").and_then(Value::as_i64).unwrap_or(1);
-    let row_count = draft
-        .get("rows")
-        .and_then(Value::as_array)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
-    let updated_at = draft
-        .get("savedAt")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| "")
-        .to_string();
+    let result = (|| -> Result<CsvImportResult, String> {
+        let file = File::open(&file_path).map_err(|e| format!("Unable to open CSV file '{}': {e}", file_path))?;
+        let mut reader = csv::ReaderBuilder::new().has_headers(true).flexible(false).from_reader(file);
+        let headers = reader.headers().map_err(|e| format!("Unable to read CSV headers: {e}"))?.clone();
+        let expected = ["PAN","Name","DOB/DOI","Mobile","E-Mail","PIN Code","Address","State","FY","Information Type","Findings","Source","Information Value","Description","Actionable AY","Verification Result Type","Statutory Reason","Income Escaping Assessment Value","Verification Information Value"];
+        if headers.len() != expected.len() || headers.iter().zip(expected.iter()).any(|(actual, expected)| actual.trim().trim_start_matches('\u{feff}') != *expected) {
+            return Err("Invalid CSV header. The file must contain the required 19 columns in the exported order.".to_string());
+        }
 
-    let draft_id = request
-        .draft_id
-        .filter(|id| !id.trim().is_empty())
-        .or_else(|| draft.get("draftId").and_then(Value::as_str).map(ToOwned::to_owned))
-        .unwrap_or_else(|| format!("draft-{}", uuid_like()));
+        clear_dataset(&conn, &temp_id)?;
+        let mut imported = 0usize;
+        let mut next_index = 1usize;
+        let mut tx = conn.unchecked_transaction().map_err(|e| format!("Unable to start CSV import transaction: {e}"))?;
 
-    let dir = root.join("drafts").join(&draft_id);
-    if dir.exists() {
-        fs::remove_dir_all(&dir).map_err(|e| format!("Unable to replace saved draft files: {e}"))?;
-    }
-    fs::create_dir_all(dir.join("documents")).map_err(|e| format!("Unable to create draft directory: {e}"))?;
+        for (idx, result) in reader.records().enumerate() {
+            let row_number = idx + 2;
+            let record = result.map_err(|e| format!("Unable to read CSV row {row_number}: {e}"))?;
+            let row = validate_and_map_record(&record, row_number, next_index, &reference_number)?;
+            execute_upsert_tx(&tx, &temp_id, &row)?;
+            imported += 1;
+            next_index += 1;
 
-    let mut draft_value = draft;
-    if let Some(obj) = draft_value.as_object_mut() {
-        obj.insert("draftId".to_string(), Value::String(draft_id.clone()));
-    }
-    let draft_json = serde_json::to_string_pretty(&draft_value).map_err(|e| e.to_string())?;
-    let draft_file = dir.join("draft.json");
-    fs::write(&draft_file, draft_json).map_err(|e| format!("Unable to write draft file: {e}"))?;
-
-    let mut first_file_name: Option<String> = None;
-    let mut first_file_size: Option<u64> = None;
-    for file in request.files {
-        let safe_name = sanitize_file_name(&file.name);
-        let local_path = dir.join("documents").join(format!("{}-{}", file.id, safe_name));
-
-        if let Some(source) = file.file_path.as_ref().filter(|value| !value.trim().is_empty()) {
-            // Keep the original user-selected path in the draft JSON so reopening the draft does
-            // not duplicate potentially large files locally. The actual bytes remain in the user's
-            // original file and are read one document at a time only during final submission.
-            if !Path::new(source).exists() {
-                return Err(format!("Unable to save document reference {}: file no longer exists.", file.name));
-            }
-            if first_file_name.is_none() {
-                first_file_name = Some(file.name.clone());
-                first_file_size = fs::metadata(source).ok().map(|m| m.len());
-            }
-        } else {
-            fs::write(&local_path, &file.bytes).map_err(|e| format!("Unable to save document {}: {e}", file.name))?;
-            if first_file_name.is_none() {
-                first_file_name = Some(file.name);
-                first_file_size = Some(file.bytes.len() as u64);
+            if imported % 10000 == 0 {
+                tx.commit().map_err(|e| format!("Unable to commit CSV import batch at row {row_number}: {e}"))?;
+                let _ = app.emit("csv-import-progress", serde_json::json!({"importedCount": imported}));
+                tx = conn.unchecked_transaction().map_err(|e| format!("Unable to start the next CSV import batch: {e}"))?;
             }
         }
+
+        tx.commit().map_err(|e| format!("Unable to finish CSV import transaction: {e}"))?;
+        if imported == 0 {
+            return Err("CSV contains no data rows.".to_string());
+        }
+
+        let base: i64 = conn.query_row("SELECT COALESCE(MAX(CAST(serial_no AS INTEGER)), 0) FROM imported_rows WHERE dataset_id=?1", params![dataset_id], |r| r.get(0))
+            .map_err(|e| format!("Unable to inspect existing serial number: {e}"))?;
+        let reference = if reference_number.trim().is_empty() { "LOCAL" } else { reference_number.trim() };
+
+        let tx = conn.unchecked_transaction().map_err(|e| format!("Unable to start CSV merge transaction: {e}"))?;
+        tx.execute(
+            "INSERT INTO imported_rows(dataset_id,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) SELECT ?1,printf('%05d',CAST(serial_no AS INTEGER)+?2),?3||'-'||printf('%05d',CAST(serial_no AS INTEGER)+?2),pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description FROM imported_rows WHERE dataset_id=?4 ORDER BY CAST(serial_no AS INTEGER)",
+            params![dataset_id, base, reference, temp_id],
+        ).map_err(|e| format!("Unable to merge imported CSV rows: {e}"))?;
+        tx.execute("DELETE FROM imported_rows WHERE dataset_id=?1", params![temp_id])
+            .map_err(|e| format!("Unable to clean temporary CSV rows: {e}"))?;
+        tx.commit().map_err(|e| format!("Unable to commit imported CSV rows: {e}"))?;
+
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1", params![dataset_id], |r| r.get(0))
+            .map_err(|e| format!("Unable to count imported CSV rows: {e}"))?;
+        let _ = app.emit("csv-import-progress", serde_json::json!({"importedCount": imported, "totalCount": total}));
+        Ok(CsvImportResult { imported_count: imported, total_count: total as usize })
+    })();
+
+    if result.is_err() {
+        let _ = conn.execute("DELETE FROM imported_rows WHERE dataset_id=?1", params![temp_id]);
     }
+    result
+}
 
-    let timestamp = if updated_at.is_empty() { now_iso() } else { updated_at.clone() };
-    conn.execute(
-        "INSERT INTO saved_draft(id,file_path,reference_number,row_count,step,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)
-         ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path, reference_number=excluded.reference_number,
-         row_count=excluded.row_count, step=excluded.step, updated_at=excluded.updated_at",
-        params![draft_id, draft_file.to_string_lossy(), reference_number, row_count as i64, step, timestamp, timestamp],
-    )
-    .map_err(|e| format!("Unable to save draft index in SQLite: {e}"))?;
+#[tauri::command(rename_all = "camelCase")]
+fn get_row_page(app: tauri::AppHandle, dataset_id: String, page: i64, page_size: i64, filter: String) -> Result<PagedRows,String>{
+    let conn=connection(&app)?; let page_size=page_size.clamp(1,1000); let page=page.max(1); let offset=(page-1)*page_size; let term=filter.trim().to_ascii_lowercase(); let like=format!("%{}%",term.replace('%',"\\%").replace('_',"\\_"));
+    let count:i64; let mut stmt;
+    if term.is_empty(){ count=conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",params![dataset_id],|r|r.get(0)).map_err(|e|e.to_string())?; stmt=conn.prepare(&format!("{ROW_SELECT} WHERE dataset_id=?1 ORDER BY CAST(serial_no AS INTEGER),serial_no LIMIT ?2 OFFSET ?3")).map_err(|e|e.to_string())?; let rows=stmt.query_map(params![dataset_id,page_size,offset],row_from_sql).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?; return Ok(PagedRows{rows,total_count:count as usize}); }
+    count=conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1 AND (pan LIKE ?2 ESCAPE '\\' OR name LIKE ?2 ESCAPE '\\' OR email LIKE ?2 ESCAPE '\\' OR address LIKE ?2 ESCAPE '\\' OR state LIKE ?2 ESCAPE '\\' OR serial_no LIKE ?2 ESCAPE '\\')",params![dataset_id,like],|r|r.get(0)).map_err(|e|e.to_string())?;
+    stmt=conn.prepare(&format!("{ROW_SELECT} WHERE dataset_id=?1 AND (pan LIKE ?4 ESCAPE '\\' OR name LIKE ?4 ESCAPE '\\' OR email LIKE ?4 ESCAPE '\\' OR address LIKE ?4 ESCAPE '\\' OR state LIKE ?4 ESCAPE '\\' OR serial_no LIKE ?4 ESCAPE '\\') ORDER BY CAST(serial_no AS INTEGER),serial_no LIMIT ?2 OFFSET ?3")).map_err(|e|e.to_string())?; let rows=stmt.query_map(params![dataset_id,page_size,offset,like],row_from_sql).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?; Ok(PagedRows{rows,total_count:count as usize})
+}
 
-    conn.execute(
-        "INSERT INTO upload_draft(id,upload_type,local_status,selected_file_name,selected_file_path,selected_file_size,created_at,updated_at)
-         VALUES(?1,'LOCAL_DRAFT','SAVED',?2,?3,?4,?5,?6)
-         ON CONFLICT(id) DO UPDATE SET local_status='SAVED', selected_file_name=excluded.selected_file_name,
-         selected_file_path=excluded.selected_file_path, selected_file_size=excluded.selected_file_size, updated_at=excluded.updated_at",
-        params![draft_id, first_file_name, draft_file.to_string_lossy(), first_file_size.map(|v| v as i64), timestamp, timestamp],
-    )
-    .map_err(|e| format!("Unable to update SQLite draft state: {e}"))?;
+#[tauri::command(rename_all = "camelCase")]
+fn get_row_by_case_id(app: tauri::AppHandle,dataset_id:String,case_id:String)->Result<Option<NativePersonRow>,String>{let conn=connection(&app)?;conn.query_row(&format!("{ROW_SELECT} WHERE dataset_id=?1 AND case_id=?2"),params![dataset_id,case_id],row_from_sql).optional().map_err(|e|e.to_string())}
+#[tauri::command(rename_all = "camelCase")]
+fn upsert_row(app: tauri::AppHandle,dataset_id:String,row:NativePersonRowInput)->Result<(),String>{let conn=connection(&app)?;execute_upsert(&conn,&dataset_id,&row)}
+#[tauri::command(rename_all = "camelCase")]
+fn delete_rows(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>)->Result<(),String>{let conn=connection(&app)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for id in case_ids{tx.execute("DELETE FROM imported_rows WHERE dataset_id=?1 AND case_id=?2",params![dataset_id,id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}
+#[tauri::command(rename_all = "camelCase")]
+fn set_rows_status(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>,status:String)->Result<(),String>{if !matches!(status.as_str(),"Pending"|"Approved"|"Completed"){return Err("Invalid verification status.".to_string());}let conn=connection(&app)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for id in case_ids{tx.execute("UPDATE imported_rows SET verification_status=?1 WHERE dataset_id=?2 AND case_id=?3",params![status,dataset_id,id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}
+#[tauri::command(rename_all = "camelCase")]
+fn clear_row_store(app: tauri::AppHandle,dataset_id:String)->Result<(),String>{let conn=connection(&app)?;clear_dataset(&conn,&dataset_id)}
+#[tauri::command(rename_all = "camelCase")]
+fn clone_row_store(app: tauri::AppHandle,source_dataset_id:String,target_dataset_id:String)->Result<usize,String>{let conn=connection(&app)?;clear_dataset(&conn,&target_dataset_id)?;let count=conn.execute("INSERT INTO imported_rows(dataset_id,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) SELECT ?1,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description FROM imported_rows WHERE dataset_id=?2",params![target_dataset_id,source_dataset_id]).map_err(|e|e.to_string())?;Ok(count)}
+#[tauri::command(rename_all = "camelCase")]
+fn rename_row_store(app: tauri::AppHandle,source_dataset_id:String,target_dataset_id:String)->Result<usize,String>{let conn=connection(&app)?;if source_dataset_id!=target_dataset_id{clear_dataset(&conn,&target_dataset_id)?;conn.execute("UPDATE imported_rows SET dataset_id=?1 WHERE dataset_id=?2",params![target_dataset_id,source_dataset_id]).map_err(|e|e.to_string())?;}conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",params![target_dataset_id],|r|r.get::<_,i64>(0)).map(|v|v as usize).map_err(|e|e.to_string())}
+#[tauri::command(rename_all = "camelCase")]
+fn seed_row_store(app: tauri::AppHandle,dataset_id:String,rows:Vec<NativePersonRowInput>)->Result<usize,String>{let conn=connection(&app)?;clear_dataset(&conn,&dataset_id)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for row in &rows{execute_upsert_tx(&tx,&dataset_id,row)?;}tx.commit().map_err(|e|e.to_string())?;Ok(rows.len())}
+#[tauri::command(rename_all = "camelCase")]
+fn export_csv_file(app: tauri::AppHandle,dataset_id:String,suggested_name:String)->Result<Option<String>,String>{let Some(path)=rfd::FileDialog::new().set_file_name(&suggested_name).add_filter("CSV files",&["csv"]).save_file() else{return Ok(None);};let conn=connection(&app)?;let file=File::create(&path).map_err(|e|format!("Unable to create CSV file: {e}"))?;let mut writer=BufWriter::with_capacity(1024*1024,file);writeln!(writer,"PAN,Name,DOB/DOI,Mobile,E-Mail,PIN Code,Address,State,FY,Information Type,Findings,Source,Information Value,Description,Actionable AY,Verification Result Type,Statutory Reason,Income Escaping Assessment Value,Verification Information Value").map_err(|e|e.to_string())?;let mut stmt=conn.prepare("SELECT pan,name,dob_doi,mobile,email,pin_code,address,state,information_fy,information_type,finding,source,information_value,information_description,actionable_ay,verification_result_type,statutory_reason,income_escaping_assessment_value,verification_information_value FROM imported_rows WHERE dataset_id=?1 ORDER BY CAST(serial_no AS INTEGER),serial_no").map_err(|e|e.to_string())?;let mut rows=stmt.query(params![dataset_id]).map_err(|e|e.to_string())?;while let Some(row)=rows.next().map_err(|e|e.to_string())?{let mut fields=Vec::with_capacity(19);for i in 0..19{let value:String=row.get(i).map_err(|e|e.to_string())?;fields.push(format!("\"{}\"",value.replace('"',"\"\"")));}writeln!(writer,"{}",fields.join(",")).map_err(|e|e.to_string())?;}writer.flush().map_err(|e|e.to_string())?;Ok(Some(path.to_string_lossy().to_string()))}
 
-    Ok(SavedDraftSummary {
-        id: draft_id,
-        reference_number: reference_number,
-        updated_at: timestamp,
-        row_count,
-        step,
-        file_path: Some(draft_file.to_string_lossy().to_string()),
-    })
+#[tauri::command]
+fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedDraftSummary, String> {
+    let root=storage_root(&app)?; let conn=connection(&app)?; let draft:Value=serde_json::from_str(&request.draft_json).map_err(|e|format!("Invalid draft JSON: {e}"))?;
+    if draft.get("version").and_then(Value::as_i64).unwrap_or_default()!=1{return Err("Unsupported draft version.".to_string());}
+    let reference_number=draft.get("packet").and_then(|p|p.get("referenceNumber")).and_then(Value::as_str).unwrap_or("").to_string();
+    let step=draft.get("step").and_then(Value::as_i64).unwrap_or(1); let row_count=draft.get("rowCount").and_then(Value::as_u64).or_else(||draft.get("rows").and_then(Value::as_array).map(|r|r.len() as u64)).unwrap_or(0);
+    let updated_at=draft.get("savedAt").and_then(Value::as_str).unwrap_or("").to_string(); let draft_id=request.draft_id.filter(|id|!id.trim().is_empty()).or_else(||draft.get("draftId").and_then(Value::as_str).map(ToOwned::to_owned)).unwrap_or_else(||format!("draft-{}",uuid_like()));
+    let working_store_id=draft.get("rowStoreId").and_then(Value::as_str).unwrap_or("").to_string();
+    if !working_store_id.is_empty(){let current_count:i64=conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",params![working_store_id],|r|r.get(0)).map_err(|e|e.to_string())?;if current_count as u64!=row_count{return Err(format!("Draft row-store mismatch: expected {row_count} rows but found {current_count}."));}rename_row_store(app.clone(),working_store_id,draft_id.clone())?;}
+    let dir=root.join("drafts").join(&draft_id);if dir.exists(){fs::remove_dir_all(&dir).map_err(|e|format!("Unable to replace saved draft files: {e}"))?;}fs::create_dir_all(dir.join("documents")).map_err(|e|format!("Unable to create draft directory: {e}"))?;
+    let mut draft_value=draft;if let Some(obj)=draft_value.as_object_mut(){obj.insert("draftId".to_string(),Value::String(draft_id.clone()));obj.insert("rowStoreId".to_string(),Value::String(draft_id.clone()));obj.insert("rowCount".to_string(),Value::Number(serde_json::Number::from(row_count)));if let Some(rows)=obj.get_mut("rows"){*rows=Value::Array(Vec::new());}}
+    let draft_file=dir.join("draft.json");fs::write(&draft_file,serde_json::to_string_pretty(&draft_value).map_err(|e|e.to_string())?).map_err(|e|format!("Unable to write draft file: {e}"))?;
+    let mut first_file_name=None;let mut first_file_size=None;for file in request.files{let safe_name=sanitize_file_name(&file.name);let local_path=dir.join("documents").join(format!("{}-{}",file.id,safe_name));if let Some(source)=file.file_path.as_ref().filter(|v|!v.trim().is_empty()){if !Path::new(source).exists(){return Err(format!("Unable to save document reference {}: file no longer exists.",file.name));}if first_file_name.is_none(){first_file_name=Some(file.name.clone());first_file_size=fs::metadata(source).ok().map(|m|m.len());}}else{fs::write(&local_path,&file.bytes).map_err(|e|format!("Unable to save document {}: {e}",file.name))?;if first_file_name.is_none(){first_file_name=Some(file.name);first_file_size=Some(file.bytes.len() as u64);}}}
+    let timestamp=if updated_at.is_empty(){now_iso()}else{updated_at.clone()};conn.execute("INSERT INTO saved_draft(id,file_path,reference_number,row_count,step,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path,reference_number=excluded.reference_number,row_count=excluded.row_count,step=excluded.step,updated_at=excluded.updated_at",params![draft_id,draft_file.to_string_lossy(),reference_number,row_count as i64,step,timestamp,timestamp]).map_err(|e|format!("Unable to save draft index in SQLite: {e}"))?;
+    // upload_draft is auxiliary state used by the upload flow. A draft must not become
+    // un-saveable merely because an older local POC database has a legacy upload_draft schema.
+    // saved_draft + draft.json are the authoritative local draft state.
+    if let Err(error) = conn.execute("INSERT INTO upload_draft(id,upload_type,local_status,selected_file_name,selected_file_path,selected_file_size,created_at,updated_at) VALUES(?1,'LOCAL_DRAFT','SAVED',?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET local_status='SAVED',selected_file_name=excluded.selected_file_name,selected_file_path=excluded.selected_file_path,selected_file_size=excluded.selected_file_size,updated_at=excluded.updated_at",params![draft_id,first_file_name,draft_file.to_string_lossy(),first_file_size.map(|v|v as i64),timestamp,timestamp]) {
+        eprintln!("Unable to update auxiliary upload_draft state: {error}");
+    }
+    Ok(SavedDraftSummary{id:draft_id,reference_number,updated_at:timestamp,row_count:row_count as usize,step,file_path:Some(draft_file.to_string_lossy().to_string())})
 }
 
 #[tauri::command]
@@ -458,6 +690,7 @@ fn delete_draft(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM saved_draft WHERE id=?1", params![draft_id]).map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM upload_draft WHERE id=?1", params![draft_id]).map_err(|e| e.to_string())?;
+    clear_dataset(&conn, &draft_id)?;
     if let Some(path) = draft_path {
         if let Some(parent) = PathBuf::from(path).parent() {
             if parent.exists() {
@@ -497,6 +730,42 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+#[tauri::command]
+fn open_government_website() -> Result<(), String> {
+    const URL: &str = "https://www.incometaxindia.gov.in/";
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", URL])
+            .spawn()
+            .map_err(|e| format!("Unable to open the Government of India website: {e}"))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(URL)
+            .spawn()
+            .map_err(|e| format!("Unable to open the Government of India website: {e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(URL)
+            .spawn()
+            .map_err(|e| format!("Unable to open the Government of India website: {e}"))?;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        return Err("Opening an external browser is not supported on this operating system.".to_string());
+    }
+
+    Ok(())
+}
+
 fn uuid_like() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -506,32 +775,10 @@ fn uuid_like() -> String {
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            pick_file,
-            pick_supporting_documents,
-            read_file_bytes,
-            save_draft,
-            list_drafts,
-            load_draft,
-            delete_draft,
-            get_storage_location,
-            save_export_file,
-            cleanup_temp_files,
-            get_app_version
+            pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_row_page,get_row_by_case_id,
+            upsert_row,delete_rows,set_rows_status,clear_row_store,clone_row_store,rename_row_store,seed_row_store,export_csv_file,
+            save_draft,list_drafts,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website
         ])
         .run(tauri::generate_context!())
         .expect("error while running Insight Data Upload Utility");
-}
-
-trait OptionalRow<T> {
-    fn optional(self) -> rusqlite::Result<Option<T>>;
-}
-
-impl<T> OptionalRow<T> for rusqlite::Result<T> {
-    fn optional(self) -> rusqlite::Result<Option<T>> {
-        match self {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
 }

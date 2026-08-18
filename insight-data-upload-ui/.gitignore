@@ -1,6 +1,63 @@
+# =========================
+# Angular / Node
+# =========================
 node_modules/
 dist/
 .angular/
 out-tsc/
-src-tauri/target/
+.nx/
+coverage/
+
+# npm / yarn / pnpm debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Environment / secrets
+# =========================
 .env
+.env.*
+!.env.example
+
+# =========================
+# Rust
+# =========================
+target/
+**/target/
+
+# =========================
+# Tauri
+# =========================
+src-tauri/target/
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.iml
+
+# =========================
+# Temporary / generated files
+# =========================
+*.tmp
+*.temp
+*.log
+
+# =========================
+# Local database / runtime data
+# =========================
+*.db
+*.sqlite
+*.sqlite3

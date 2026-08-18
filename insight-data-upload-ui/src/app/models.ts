@@ -69,6 +69,9 @@ export interface DraftState {
   step: number;
   packet: PacketDetails;
   rows: PersonRow[];
+  /** In Tauri desktop mode, person rows live in the native SQLite row store instead of this JSON array. */
+  rowStoreId?: string;
+  rowCount?: number;
   documents: Array<Omit<AttachedDocument, 'file'>>;
   draftId?: string;
 }

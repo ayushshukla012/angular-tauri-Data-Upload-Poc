@@ -141,7 +141,7 @@ The Tauri desktop build opens a native save dialog. Browser mode falls back to a
 7. Uses compact pagination controls instead of rendering thousands of page buttons.
 8. Yields periodically while processing large imports so the UI can continue to respond.
 
-The current UI file-size ceiling remains **25 MB**, matching the supplied Data Uploads Utility screen. The included `samples/sample-data-100k.csv` is a 100,000-row file designed to fit inside that limit.
+The current UI file-size ceiling remains **25 MB**, matching the supplied Data Uploads Utility screen. 
 
 Only the current page is rendered in the table; the application does not render 100,000 DOM rows at once.
 
@@ -150,7 +150,6 @@ Only the current page is rendered in the table; the application does not render 
 The ZIP includes:
 
 ```text
-samples/sample-data-100k.csv
 ```
 
 It contains exactly 100,000 data rows plus the CSV header and uses the same 19-column format expected by `Import CSV`.

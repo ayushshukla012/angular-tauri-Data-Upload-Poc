@@ -1,9 +1,12 @@
 <div class="app-shell">
   <div class="gov-bar">
-    <div class="gov-left"><span class="flag">🇮🇳</span><span>Government of India</span><span class="external">↗</span></div>
+    <div class="gov-left">
+      <span class="flag">🇮🇳</span>
+      <button class="gov-link" type="button" (click)="openGovernmentSite()">Government of India <span class="external" aria-hidden="true">↗</span></button>
+    </div>
     <div class="gov-tools">
-      <button type="button">Skip to Main Content</button>
-      <button type="button">A−</button><button type="button" aria-label="Accessibility">▧</button><button type="button">A+</button>
+      <button type="button" (click)="skipToMain()">Skip to Main Content</button>
+      <button type="button" (click)="decreaseZoom()" [disabled]="zoomPercent() === 80" aria-label="Decrease text size">A−</button><button type="button" aria-label="Accessibility">▧</button><button type="button" (click)="increaseZoom()" [disabled]="zoomPercent() === 125" aria-label="Increase text size">A+</button>
       <span class="divider"></span><span>☼</span><span>English⌄</span>
     </div>
   </div>
@@ -43,7 +46,7 @@
   }
 
   @if (step() === 0) {
-    <main class="landing">
+    <main id="main-content" class="landing" tabindex="-1">
       <section class="welcome-panel">
         <div class="welcome-copy">
           <h1>Data Uploads Utility</h1>
@@ -64,7 +67,7 @@
       </section>
     </main>
   } @else if (step() === 1) {
-    <main class="content-wrap">
+    <main id="main-content" class="content-wrap" tabindex="-1">
       <section class="panel packet-panel">
         <div class="panel-heading">
           <div><h1>Packet Details</h1><p>Capture case packet information before adding information records and documents.</p></div>
@@ -98,7 +101,7 @@
       </section>
     </main>
   } @else if (step() === 2) {
-    <main class="content-wrap">
+    <main id="main-content" class="content-wrap" tabindex="-1">
       <section class="panel people-panel">
         <div class="panel-heading">
           <div><div class="title-line"><h1>Person &amp; Verification Details</h1><span class="reference-chip">Reference Number/File Number : {{packetForm.controls.referenceNumber.value || '—'}}</span></div><p>Manage Information Records, General Documents, CSV Operations and Evidence Tracking in one place.</p></div>
@@ -128,7 +131,7 @@
               </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of pagedRows(); let i = index">
+              <tr *ngFor="let row of pagedRows(); trackBy: trackByCaseId">
                 <td><input type="checkbox" [disabled]="row.verificationStatus === 'Completed'" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
                 <td>{{row.serialNo}}</td><td class="mono">{{row.pan}}</td><td>{{row.name}}</td><td>{{row.dobDoi}}</td><td>{{row.address}}</td><td>{{row.state}}</td><td>{{row.pinCode}}</td><td class="truncate" [title]="row.email">{{row.email}}</td><td>{{documentCountByCaseId().get(row.caseId) || 0}}</td>
                 <td>
@@ -162,25 +165,25 @@
             <button *ngIf="p !== '…'" type="button" [class.active-page]="page() === p" (click)="setPage(p)">{{p}}</button>
           </ng-container>
           <button type="button" [disabled]="page() === pageCount()" (click)="setPage(page() + 1)" aria-label="Next page">›</button>
-          <span>Showing {{pagedRows().length}} of {{filteredRows().length}} items</span>
+          <span>Showing {{pagedRows().length}} of {{visibleRowCount().toLocaleString()}} items</span>
           <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
         </div>
 
         <div class="footer-actions">
           <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="!rows().length" (click)="nextToCreate()">Next</button></div>
+          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="visibleRowCount() === 0" (click)="nextToCreate()">Next</button></div>
         </div>
       </section>
     </main>
   } @else if (step() === 3) {
-    <main class="content-wrap">
+    <main id="main-content" class="content-wrap" tabindex="-1">
       <section class="panel create-panel">
         <div class="panel-heading"><div><h1>Create Packet</h1><p>Review the packet and submit the prepared case records and supporting documents.</p></div></div>
         <div class="review-grid">
           <div class="review-card"><span>Report Type</span><strong>{{packet.reportType}}</strong></div>
           <div class="review-card"><span>Reference Number</span><strong>{{packet.referenceNumber}}</strong></div>
           <div class="review-card"><span>Submitting Person</span><strong>{{packet.submittingPersonName}}</strong></div>
-          <div class="review-card"><span>Records</span><strong>{{rows().length}}</strong></div>
+          <div class="review-card"><span>Records</span><strong>{{visibleRowCount().toLocaleString()}}</strong></div>
           <div class="review-card"><span>Documents</span><strong>{{documents().length}}</strong></div>
           <div class="review-card"><span>Backend designation</span><strong>{{environmentLabel}}</strong></div>
         </div>
@@ -281,16 +284,15 @@
       <div class="modal-header"><h2>Import CSV</h2><button type="button" (click)="closeModal()">×</button></div>
       <div class="modal-body center-drop" (dragover)="onDragOver($event)" (drop)="handleCsvDrop($event)">
         <input #csvFileInput id="csvFileInput" type="file" accept=".csv,text/csv" class="visually-hidden" (change)="handleCsvSelection($event)">
-        <div class="upload-picker" role="button" tabindex="0" (click)="browseForCsv(csvFileInput)" (keydown.enter)="browseForCsv(csvFileInput)" (keydown.space)="$event.preventDefault(); browseForCsv(csvFileInput)">
+        <div class="upload-picker" role="button" tabindex="0" (click)="browseCsvFile(csvFileInput)" (keydown.enter)="browseCsvFile(csvFileInput)" (keydown.space)="$event.preventDefault(); browseCsvFile(csvFileInput)">
           <div class="upload-icon">☁</div>
           <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
-          <small>Maximum allowed file size: 25 MB.</small>
+          <small>Large CSV files are imported into the desktop row store for memory-safe paging.</small>
         </div>
         <div *ngIf="csvFile()" class="file-pill">
           <span>✓</span>{{csvFile()?.name}}
           <button type="button" (click)="csvFile.set(null)">✕</button>
         </div>
-        <button class="sample-link" type="button" (click)="browseForCsv(csvFileInput)">📋 Load Sample CSV</button>
       </div>
       <div class="csv-progress" *ngIf="csvImportProgress()">{{csvImportProgress()}}</div>
       <div class="modal-footer"><button class="outline" type="button" [disabled]="importBusy()" (click)="closeModal()">Cancel</button><button class="primary" type="button" [disabled]="importBusy()" (click)="importCsv()">{{importBusy() ? 'Importing…' : 'Load CSV'}}</button></div>
@@ -348,10 +350,22 @@
         <div class="draft-import-area">
           <input #draftFileInput id="draftFileInput" type="file" class="visually-hidden" accept="application/json,.json" (change)="handleDraftFile($event)">
           <button class="link-button" type="button" (click)="draftFileInput.click()">Import exported draft JSON</button>
-          <button class="link-button" type="button" [disabled]="!rows().length && !packetForm.value.referenceNumber" (click)="exportDraftFile()">Export current draft JSON</button>
         </div>
       </div>
       <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button></div>
+    </section>
+  </div>
+
+  <!-- Close confirmation modal -->
+  <div class="modal-backdrop" *ngIf="modal() === 'closeConfirm'">
+    <section class="modal small close-modal" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
+      <div class="modal-header"><h2 id="close-dialog-title">Save your work before exiting?</h2></div>
+      <div class="modal-body"><p class="close-message">There is unsaved data on screen. Choose how you want to close the utility.</p></div>
+      <div class="modal-footer close-actions">
+        <button class="primary" type="button" [disabled]="closing()" (click)="saveDraftAndExit()">Save Draft &amp; Exit</button>
+        <button class="outline danger-outline" type="button" [disabled]="closing()" (click)="exitWithoutSaving()">Exit Without Saving</button>
+        <button class="link-button" type="button" [disabled]="closing()" (click)="closeModal()">Cancel</button>
+      </div>
     </section>
   </div>
 

@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default desktop capabilities for the Insight Data Uploads Utility.","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:window:allow-close","core:window:allow-destroy"]}}
