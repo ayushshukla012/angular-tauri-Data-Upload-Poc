@@ -13,8 +13,8 @@ It exists to prevent agents from reading the entire repository before making a n
 4. `/package.json`
 5. `/angular.json`
 6. `/src/app/app.config.ts`
-7. `/src/app/app.routes.ts`
-8. `/src/app/core/config/app-config.service.ts`
+7. `/src/app/core/config/app-config.service.ts`
+8. `/src/app/app.component.ts` only when the requested area belongs to the current page
 9. `/docs/contracts/openapi.yaml` only when an API contract is relevant
 10. The smallest feature-local `CONTEXT.md` for the requested area
 
@@ -27,7 +27,7 @@ This is a desktop Data Upload utility built with:
 - Angular standalone components
 - Angular zoneless change detection
 - NgRx SignalStore
-- Angular CDK virtual scrolling
+- Page-bounded native SQLite rendering for the current page-based UX
 - Tauri 2.x
 - Rust native data access
 - Spring Boot REST APIs
@@ -40,11 +40,36 @@ The native Rust layer owns large local datasets. Angular owns UI state and only 
 - Initial data readiness target: `<= 8 seconds`.
 - TTFR target: `<= 1.5 seconds`.
 - UI must remain responsive while scrolling/filtering.
-- Active DOM rows target: `<= 150`.
+- Active DOM rows target: `<= 150` (current page size is bounded; continuous CDK scrolling is not the current UI contract).
 - Angular must never materialize all dataset rows into DOM or permanent SignalStore state.
 - Filtering/sorting of millions of rows must not run in Angular.
 - Large data operations belong in Rust/native storage or the backend.
 - Any performance regression must block merge until explicitly accepted.
+
+
+## Current implementation status
+
+This repository is in an incremental architecture migration.
+
+Implemented:
+- runtime `AppConfigService`
+- Tauri 2 native row store
+- asynchronous native CSV import worker
+- first-100-row progressive handoff from import modal to table
+- 10,000-row background import/progress checkpoints
+- live loaded-record count and pagination growth while import continues
+- bounded SQLite paging
+- background close cleanup so Exit Without Saving is not blocked by SQLite deletion
+- progress/error IPC events
+- AI context files
+- typed backend service
+
+Still centralized in the current POC screen:
+- `src/app/app.component.ts`
+- `src/app/app.component.html`
+- `src/app/services/*`
+
+Do not pretend `SignalStore`, a CDK virtual table, or a separate feature component hierarchy is already wired into the current screen. Introduce those only as part of an explicit refactor.
 
 ## Architecture map
 
@@ -102,33 +127,41 @@ Before adding or changing an endpoint, request field, response field, or status 
 
 Never invent a data-query endpoint simply because the UI needs one. Large local dataset reads use the Tauri/native path unless the backend contract explicitly provides the required query API.
 
-## Large dataset path
+## Large CSV import path
 
 ```text
-CSV / native dataset
+CSV file
       |
       v
-Rust local store
-      |
-      | LIMIT/OFFSET or keyset window
-      v
-bounded chunk
+Tauri 2 async command
       |
       v
-Tauri IPC/event
+Rust worker / buffered csv parser
+      |
+      +--> bounded SQLite transactions
+      +--> dataset metadata row_count
+      +--> progress events (first 100, then 10,000-row checkpoints)
+      +--> final row-order index after bulk import
       |
       v
-DataRecordsStore
+native row store
       |
-      | bounded cache only
+      | LIMIT/OFFSET page query
       v
-CDK viewport
+current page only
       |
       v
-small DOM window
+Angular table
 ```
 
+The current UX is page-based. Never bind a million-row array to `ngFor`.
 Never send the full dataset through one IPC payload.
+The import modal must close as soon as the first configured readiness batch (default 100 rows) is queryable.
+While importing, the table shows currently loaded pages and the count expands at configured progress checkpoints (default 10,000 rows).
+Exit Without Saving must destroy the window without awaiting large SQLite cleanup.
+The import modal must close as soon as the first configured readiness batch (default 100 rows) is queryable.
+While importing, the table shows currently loaded pages and the count expands at configured progress checkpoints (default 10,000 rows).
+Exit Without Saving must destroy the window without awaiting large SQLite cleanup.
 
 ## Feature context routing
 

@@ -60,7 +60,7 @@ architecture:
     - "NgRx SignalStore for feature state"
     - "OnPush change detection for components"
     - "Configuration-driven behavior"
-    - "Virtualized rendering for large datasets"
+    - "Bounded native pagination for the current page-based UX"
     - "Bounded in-memory windows"
     - "Native/Tauri processing for heavy local data operations"
     - "REST contract compatibility with supplied Spring Boot APIs"
@@ -130,7 +130,7 @@ hard_rules:
     ipc_payloads_must_be_bounded: true
   performance:
     giant_ngfor_forbidden: true
-    cdk_virtual_scrolling_required_for_massive_tables: true
+    cdk_virtual_scrolling_required_if_continuous_scrolling_is_introduced: true
     trackby_required: true
     stable_row_identity_required: true
     bounded_cache_required: true
@@ -174,10 +174,10 @@ performance_sla:
 large_dataset_strategy:
   canonical_path:
     - "Persistent/native store"
-    - "bounded range query"
-    - "chunked IPC/event delivery"
-    - "SignalStore bounded cache"
-    - "CDK virtual viewport"
+    - "streaming CSV ingestion outside the Tauri main thread"
+    - "bounded native page query"
+    - "bounded IPC/event delivery"
+    - "Angular keeps only the current page"
     - "small DOM window"
   defaults:
     request_chunk_rows: "runtime config"
@@ -487,3 +487,44 @@ maintenance:
     - "Angular major version changes"
     - "State-management architecture changes"
   rule: "The standards file and feature-local context files must evolve with the architecture."
+
+
+csv_import_performance:
+  source_path: "src/assets/config/app-config.json"
+  native_command: "import_csv_to_store"
+  execution: "Tauri 2 async command + spawn_blocking worker"
+  parser: "streaming csv crate with buffered reader"
+  storage: "SQLite WAL"
+  transaction_strategy: "bounded batches"
+  indexes_during_ingest: "row-order index only after configured ready threshold"
+  progress_event: "csv-import-progress"
+  completion_event: "csv-import-progress with completed=true"
+  error_event: "csv-import-error"
+  forbidden:
+    - "CSV File.text() for desktop large files"
+    - "whole-file JS parsing"
+    - "synchronous Rust import command"
+    - "temporary double-write dataset merge for every import"
+
+
+implementation_status:
+  migration_mode: "incremental"
+  current_screen_owner: "src/app/app.component.ts"
+  current_screen_template: "src/app/app.component.html"
+  native_csv_import: "implemented"
+  runtime_config: "implemented"
+  bounded_sqlite_paging: "implemented"
+  signal_store: "target architecture; not yet wired into the legacy screen"
+  cdk_virtual_scroll: "target option if the UX moves from pagination to continuous scrolling"
+  rule: "Do not claim target architecture components are already implemented unless the source file actually exists and is wired into the active route."
+
+
+progressive_csv_import:
+  ready_rows: 100
+  background_batch_rows: 10000
+  progress_checkpoint_rows: 10000
+  modal_release_on_first_ready_batch: true
+  table_must_remain_interactive_during_import: true
+  loaded_count_must_update_live: true
+  page_count_must_reflect_loaded_rows: true
+  exit_without_saving_must_not_await_large_cleanup: true

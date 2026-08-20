@@ -13,10 +13,7 @@
 
   <header class="brand-header">
     <button class="brand" type="button" (click)="goHome()" aria-label="Go to home">
-      <span class="brand-mark" aria-hidden="true">
-        <span class="node n1"></span><span class="node n2"></span><span class="node n3"></span><span class="node n4"></span>
-        <span class="edge e1"></span><span class="edge e2"></span><span class="edge e3"></span><span class="edge e4"></span>
-      </span>
+      <img src="assets/itd-logo.png" alt="Income Tax Department" class="brand-logo">
       <span class="brand-copy"><strong>Data Uploads Utility</strong><small>Government of India</small></span>
     </button>
     <div class="header-links">
@@ -111,15 +108,20 @@
 
         <div class="toolbar">
           <div class="toolbar-left">
-            <button class="outline" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">📄 General Document</button>
-            <button class="outline" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="deleteSelected()">▢ Delete</button>
-            <button class="outline" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="validateRows()">✓ Validate</button>
+            <button class="outline" type="button" [disabled]="csvImportActive() || selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">📄 General Document</button>
+            <button class="outline" type="button" [disabled]="csvImportActive() || selectedRows().size === 0 || hasCompletedSelection()" (click)="deleteSelected()">▢ Delete</button>
+            <button class="outline" type="button" [disabled]="csvImportActive() || selectedRows().size === 0 || hasCompletedSelection()" (click)="validateRows()">✓ Validate</button>
           </div>
           <div class="toolbar-right">
-            <button class="outline" type="button" (click)="exportCsv()">⇩ Export CSV</button>
-            <button class="primary" type="button" (click)="openAddRow()">＋ Add Row</button>
-            <button class="primary" type="button" (click)="openCsvModal()">⇧ Import CSV</button>
+            <button class="outline" type="button" [disabled]="csvImportActive()" (click)="exportCsv()">⇩ Export CSV</button>
+            <button class="primary" type="button" [disabled]="csvImportActive()" (click)="openAddRow()">＋ Add Row</button>
+            <button class="primary" type="button" [disabled]="csvImportActive()" (click)="openCsvModal()">⇧ Import CSV</button>
           </div>
+        </div>
+
+        <div class="csv-background-status" *ngIf="csvImportActive() || csvImportProgress()">
+          <span class="csv-status-dot" aria-hidden="true"></span>
+          <span>{{csvImportProgress() || 'Loading CSV records in the background…'}}</span>
         </div>
 
         <div class="table-wrap">
@@ -166,12 +168,12 @@
           </ng-container>
           <button type="button" [disabled]="page() === pageCount()" (click)="setPage(page() + 1)" aria-label="Next page">›</button>
           <span>Showing {{pagedRows().length}} of {{visibleRowCount().toLocaleString()}} items</span>
-          <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
+          <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option *ngFor="let size of pageSizeOptions" [value]="size">{{size}}</option></select>
         </div>
 
         <div class="footer-actions">
           <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="visibleRowCount() === 0" (click)="nextToCreate()">Next</button></div>
+          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="csvImportActive() || visibleRowCount() === 0" (click)="nextToCreate()">Next</button></div>
         </div>
       </section>
     </main>
@@ -281,21 +283,21 @@
   <!-- CSV modal -->
   <div class="modal-backdrop" *ngIf="modal() === 'csv'" (click)="$event.target === $event.currentTarget && closeModal()">
     <section class="modal medium" role="dialog" aria-modal="true">
-      <div class="modal-header"><h2>Import CSV</h2><button type="button" (click)="closeModal()">×</button></div>
-      <div class="modal-body center-drop" (dragover)="onDragOver($event)" (drop)="handleCsvDrop($event)">
-        <input #csvFileInput id="csvFileInput" type="file" accept=".csv,text/csv" class="visually-hidden" (change)="handleCsvSelection($event)">
-        <div class="upload-picker" role="button" tabindex="0" (click)="browseCsvFile(csvFileInput)" (keydown.enter)="browseCsvFile(csvFileInput)" (keydown.space)="$event.preventDefault(); browseCsvFile(csvFileInput)">
+      <div class="modal-header"><h2>Import CSV</h2><button type="button" [disabled]="importBusy()" (click)="closeModal()">×</button></div>
+      <div class="modal-body center-drop" [class.disabled]="importBusy()" (dragover)="!importBusy() && onDragOver($event)" (drop)="!importBusy() && handleCsvDrop($event)">
+        <input #csvFileInput id="csvFileInput" type="file" accept=".csv,text/csv" class="visually-hidden" (change)="handleCsvSelection($event)" [disabled]="importBusy()">
+        <div class="upload-picker" [class.disabled]="importBusy()" role="button" [attr.tabindex]="importBusy() ? -1 : 0" (click)="!importBusy() && browseCsvFile(csvFileInput)" (keydown.enter)="!importBusy() && browseCsvFile(csvFileInput)" (keydown.space)="$event.preventDefault(); !importBusy() && browseCsvFile(csvFileInput)">
           <div class="upload-icon">☁</div>
           <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
           <small>Large CSV files are imported into the desktop row store for memory-safe paging.</small>
         </div>
         <div *ngIf="csvFile()" class="file-pill">
           <span>✓</span>{{csvFile()?.name}}
-          <button type="button" (click)="csvFile.set(null)">✕</button>
+          <button type="button" [disabled]="importBusy()" (click)="csvFile.set(null)">✕</button>
         </div>
       </div>
       <div class="csv-progress" *ngIf="csvImportProgress()">{{csvImportProgress()}}</div>
-      <div class="modal-footer"><button class="outline" type="button" [disabled]="importBusy()" (click)="closeModal()">Cancel</button><button class="primary" type="button" [disabled]="importBusy()" (click)="importCsv()">{{importBusy() ? 'Importing…' : 'Load CSV'}}</button></div>
+      <div class="modal-footer"><button class="outline" type="button" [disabled]="importBusy()" (click)="closeModal()">Cancel</button><button class="primary" type="button" [disabled]="importBusy()" (click)="importCsv()">{{importBusy() ? 'Starting…' : 'Load CSV'}}</button></div>
     </section>
   </div>
 

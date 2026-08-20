@@ -288,3 +288,13 @@ README.md
 - CSV export falls back to the WebView/browser download path if the native save dialog is unavailable; the user is never blocked by a native-dialog-only failure.
 - Verification Status UI exposes only `Pending` and `Approved` as selectable values. `Completed` is shown as a locked state after validation.
 - Completed rows cannot be selected and cannot be edited, deleted, validated, or used for General Document actions.
+
+
+## Large CSV import performance
+
+The desktop import path is native-first. `import_csv_to_store` is a Tauri 2 async command,
+and the heavy parser/SQLite work runs in a background blocking worker. The command returns
+immediately, progress is emitted through `csv-import-progress`, the first ready batch is
+made available to the utility UI, and the remaining records continue importing.
+
+See `docs/PERFORMANCE_IMPORT.md` for the detailed performance design and SLA test procedure.

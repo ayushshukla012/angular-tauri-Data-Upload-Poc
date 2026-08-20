@@ -12,19 +12,36 @@
     }
   },
   "application": {
-    "governmentWebsiteUrl": "https://www.incometaxindia.gov.in/"
+    "governmentWebsiteUrl": "https://www.incometaxindia.gov.in/",
+    "name": "Insight Data Uploads Utility",
+    "environment": "desktop",
+    "defaultCaseDesignation": "Data Upload Utility"
   },
   "features": {},
   "virtualScroll": {
     "rowHeightPx": 40,
-    "bufferRows": 20
+    "bufferRows": 20,
+    "renderedRows": 50
   },
   "pagination": {
-    "defaultPageSize": 50
+    "defaultPageSize": 50,
+    "pageSizeOptions": [
+      10,
+      25,
+      50,
+      100
+    ]
   },
   "tooling": {
     "devServerHost": "localhost",
     "devServerPort": 4200,
     "devUrlHost": "http://localhost"
+  },
+  "csvImport": {
+    "batchRows": 10000,
+    "readyRows": 100,
+    "progressRows": 10000,
+    "sqliteCacheMb": 64,
+    "maxFileBytes": 1073741824
   }
 }
