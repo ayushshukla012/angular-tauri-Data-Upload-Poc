@@ -4,7 +4,7 @@ ALTER TABLE cases
     ADD COLUMN reference_number VARCHAR(128),
     ADD COLUMN date_of_birth VARCHAR(16),
     ADD COLUMN address TEXT,
-    ADD COLUMN state_ut_code VARCHAR(8),
+    ADD COLUMN state_ut_code VARCHAR(128),
     ADD COLUMN pincode VARCHAR(10),
     ADD COLUMN email VARCHAR(256),
     ADD COLUMN information_fy VARCHAR(16),

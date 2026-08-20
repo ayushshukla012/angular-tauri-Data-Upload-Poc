@@ -32,6 +32,7 @@ public class Case {
     private String dateOfBirth;
     @Column(columnDefinition = "TEXT")
     private String address;
+    @Column(name = "state_ut_code", length = 128)
     private String stateUtCode;
     private String pincode;
     private String email;

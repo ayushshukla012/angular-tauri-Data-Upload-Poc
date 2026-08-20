@@ -1,0 +1,2 @@
+ALTER TABLE cases
+    ALTER COLUMN state_ut_code TYPE VARCHAR(128);

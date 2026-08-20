@@ -294,3 +294,12 @@ and [`docs/reporting-service.md`](reporting-service.md) §3.
 5. **`common-library`'s scope** — is `storage` (S3/MinIO) the right thing to keep centralizing
    here, or should it move to a dedicated `storage-client` module now that it's grown beyond
    simple DTOs/exceptions?
+
+## Current change set — 2026-08-21
+
+- Case `state_ut_code` is widened from `VARCHAR(8)` to `VARCHAR(128)` using Flyway migration
+  `V7__expand_state_ut_code.sql` so full State/UT names are accepted.
+- Packet, case, and completed document metadata are mirrored into the configured S3-compatible
+  object store (MinIO locally) as deterministic JSON objects.
+- Case document content uses the same deterministic packet/case/document hierarchy so an object
+  processor can fetch the document and its metadata without scanning PostgreSQL.

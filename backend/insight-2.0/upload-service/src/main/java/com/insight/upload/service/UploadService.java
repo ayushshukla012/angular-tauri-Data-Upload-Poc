@@ -51,6 +51,7 @@ public class UploadService {
     private final UploadMapper uploadMapper;
     private final ObjectStorageClient objectStorageClient;
     private final ObjectStorageProperties storageProperties;
+    private final ObjectStorageMetadataService metadataService;
 
     public UploadService(UploadRepository uploadRepository,
                           OutboxEventRepository outboxEventRepository,
@@ -58,7 +59,8 @@ public class UploadService {
                           CaseService caseService,
                           UploadMapper uploadMapper,
                           ObjectStorageClient objectStorageClient,
-                          ObjectStorageProperties storageProperties) {
+                          ObjectStorageProperties storageProperties,
+                          ObjectStorageMetadataService metadataService) {
         this.uploadRepository = uploadRepository;
         this.outboxEventRepository = outboxEventRepository;
         this.documentRepository = documentRepository;
@@ -66,6 +68,7 @@ public class UploadService {
         this.uploadMapper = uploadMapper;
         this.objectStorageClient = objectStorageClient;
         this.storageProperties = storageProperties;
+        this.metadataService = metadataService;
     }
 
     /**
@@ -90,9 +93,15 @@ public class UploadService {
 
         UUID uploadId = UUID.randomUUID();
         String fileType = resolveFileType(fileName);
-        String bucket = "data-upload";
-        String storageKey = "%s/%s".formatted(bucket, fileName);
         String contentType = contentTypeFor(fileType);
+        String storageKey;
+        if (caseId != null) {
+            Case caseEntity = caseService.requireCase(caseId);
+            storageKey = metadataService.documentContentKey(
+                    caseEntity, uploadId, fileName);
+        } else {
+            storageKey = metadataService.genericContentKey(uploadId, fileName);
+        }
 
         Upload upload = new Upload(uploadId, fileName, fileType, storageKey, fileSizeBytes);
         Instant expiresAt = Instant.now().plus(PRESIGNED_URL_TTL);
@@ -155,6 +164,7 @@ public class UploadService {
                 .orElseThrow(() -> new UploadNotFoundException(uploadId));
 
         if (upload.getStatus() != UploadStatus.PENDING) {
+            writeCompletedMetadata(upload);
             return uploadMapper.toResponse(upload); // already completed — idempotent no-op
         }
 
@@ -171,9 +181,22 @@ public class UploadService {
                 """.formatted(uploadId, upload.getStorageReference(), upload.getFileType());
         outboxEventRepository.save(new OutboxEvent(UUID.randomUUID(), "upload.events.received", uploadId, payload));
 
+        writeCompletedMetadata(upload);
+
         progressCaseIfLinked(uploadId);
 
         return uploadMapper.toResponse(upload);
+    }
+
+    private void writeCompletedMetadata(Upload upload) {
+        Optional<Document> linkedDocument = documentRepository.findByUploadId(upload.getId());
+        if (linkedDocument.isPresent()) {
+            Document document = linkedDocument.get();
+            Case caseEntity = caseService.requireCase(document.getCaseId());
+            metadataService.writeDocumentMetadata(caseEntity, document, upload);
+        } else {
+            metadataService.writeGenericUploadMetadata(upload);
+        }
     }
 
     /**

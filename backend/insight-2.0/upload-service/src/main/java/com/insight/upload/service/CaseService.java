@@ -32,6 +32,7 @@ public class CaseService {
     private final CaseValidator caseValidator;
     private final CaseMapper caseMapper;
     private final ObjectMapper objectMapper;
+    private final ObjectStorageMetadataService metadataService;
     private final PacketService packetService;
 
     public CaseService(CaseRepository caseRepository,
@@ -40,6 +41,7 @@ public class CaseService {
                         CaseValidator caseValidator,
                         CaseMapper caseMapper,
                         ObjectMapper objectMapper,
+                        ObjectStorageMetadataService metadataService,
                         PacketService packetService) {
         this.caseRepository = caseRepository;
         this.documentRepository = documentRepository;
@@ -47,6 +49,7 @@ public class CaseService {
         this.caseValidator = caseValidator;
         this.caseMapper = caseMapper;
         this.objectMapper = objectMapper;
+        this.metadataService = metadataService;
         this.packetService = packetService;
     }
 
@@ -60,6 +63,7 @@ public class CaseService {
     public CaseResponse submitCase(SubmitCaseRequest request) {
         Optional<Case> existing = caseRepository.findById(request.caseId());
         if (existing.isPresent()) {
+            metadataService.writeCaseMetadata(existing.get());
             return caseMapper.toResponse(existing.get());
         }
 
@@ -76,6 +80,7 @@ public class CaseService {
                 request.mobileNumber(), request.designation(), writeExtraFields(request.extraFields()));
         applyOptionalFields(caseEntity, request);
         caseRepository.save(caseEntity);
+        metadataService.writeCaseMetadata(caseEntity);
         return caseMapper.toResponse(caseEntity);
     }
 

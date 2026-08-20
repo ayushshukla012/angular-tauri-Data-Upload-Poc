@@ -108,3 +108,34 @@ MinIO at all), unlike the old `put(...)` which streamed the whole file over the 
   transaction: either every DB write inside it commits together, or (on an exception) they all
   roll back together. The lesson from the bug we fixed: only put things that need that
   all-or-nothing guarantee inside it — not slow calls to other systems.
+
+## Object-storage metadata layout
+
+The upload service now mirrors portal metadata into the same S3/MinIO bucket as the uploaded
+objects. PostgreSQL remains the transactional system of record; MinIO contains the durable JSON
+snapshot needed for object-centric retrieval and document processing.
+
+```text
+insight-uploads/
+└── data-upload/
+    ├── packets/{batchNumber}/
+    │   ├── metadata/packet.json
+    │   └── cases/{caseId}/
+    │       ├── metadata/case.json
+    │       └── documents/{uploadId}/
+    │           ├── metadata.json
+    │           └── content/{fileName}
+    │
+    ├── cases/{caseId}/                  # when a case is not attached to a packet
+    │   ├── metadata/case.json
+    │   └── documents/{uploadId}/
+    │       ├── metadata.json
+    │       └── content/{fileName}
+    │
+    └── uploads/{uploadId}/              # generic upload, not linked to a case
+        ├── metadata.json
+        └── content/{fileName}
+```
+
+Metadata is stored as UTF-8 `application/json` and uses `schemaVersion: 1` so it can be evolved
+without changing the object naming contract.

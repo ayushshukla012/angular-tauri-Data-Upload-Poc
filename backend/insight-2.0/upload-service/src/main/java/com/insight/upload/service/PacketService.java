@@ -14,9 +14,12 @@ import java.util.Optional;
 public class PacketService {
 
     private final PacketRepository packetRepository;
+    private final ObjectStorageMetadataService metadataService;
 
-    public PacketService(PacketRepository packetRepository) {
+    public PacketService(PacketRepository packetRepository,
+                         ObjectStorageMetadataService metadataService) {
         this.packetRepository = packetRepository;
+        this.metadataService = metadataService;
     }
 
     /**
@@ -27,12 +30,14 @@ public class PacketService {
     public PacketResponse submitPacket(SubmitPacketRequest request) {
         Optional<Packet> existing = packetRepository.findById(request.batchNumber());
         if (existing.isPresent()) {
+            metadataService.writePacketMetadata(existing.get());
             return toResponse(existing.get());
         }
 
         Packet packet = new Packet(request.batchNumber(), request.description(), request.submittingPersonName(),
                 request.submittingPersonAddress(), request.submittingPersonMobile(), request.submittingPersonEmail());
         packetRepository.save(packet);
+        metadataService.writePacketMetadata(packet);
         return toResponse(packet);
     }
 
