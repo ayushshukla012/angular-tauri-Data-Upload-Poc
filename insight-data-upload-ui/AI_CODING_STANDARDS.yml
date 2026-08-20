@@ -1,0 +1,489 @@
+version: "1.0"
+kind: "ai-coding-standards"
+name: "Insight Data Upload - AI Engineering Contract"
+description: >-
+  Canonical repository-level contract for Codex, AI IDEs, code assistants, and human
+  developers. The assistant MUST treat this file as the first architectural authority,
+  load only the referenced context files needed for the requested change, preserve
+  existing contracts, and optimize every UI/data-path change for the rendering SLA.
+
+project:
+  name: "Insight Data Upload"
+  type: "Angular + Tauri 2 desktop data-upload application"
+  architecture: "standalone Angular + zoneless + NgRx SignalStore + Tauri 2 Rust"
+  backend: "Spring Boot REST ecosystem"
+  frontend_root: "src/"
+  tauri_root: "src-tauri/"
+
+ai_working_protocol:
+  priority_order:
+    - "This file"
+    - "docs/AI_CONTEXT.md"
+    - "docs/FRONTEND_ARCHITECTURE.md"
+    - "OpenAPI contract supplied in repository"
+    - "Feature-local README/CONTEXT files"
+    - "Existing implementation"
+  first_read_only:
+    - "AI_CODING_STANDARDS.yml"
+    - "docs/AI_CONTEXT.md"
+    - "docs/FRONTEND_ARCHITECTURE.md"
+    - "package.json"
+    - "angular.json"
+    - "src/app/app.config.ts"
+    - "src/app/app.routes.ts"
+    - "src/app/core/config/app-config.service.ts"
+  context_budget:
+    default_max_files_before_edit: 12
+    default_max_lines_before_edit: 2500
+    expand_context_only_when:
+      - "A referenced symbol is outside the initially loaded files"
+      - "A public API/contract is being changed"
+      - "A build/test failure requires dependency tracing"
+      - "A security-sensitive flow requires end-to-end inspection"
+  never_read_entire_repository_by_default: true
+  prefer_symbol_search_over_full_file_reads: true
+  prefer_feature_context_over_global_context: true
+  before_edit:
+    - "State the requested change in one sentence internally"
+    - "Identify the smallest owning feature/module"
+    - "Read local context first"
+    - "Inspect contracts before implementation"
+    - "Make the smallest safe change"
+    - "Run targeted tests/lint/typecheck"
+    - "Run performance checks when rendering/data-path code changes"
+
+architecture:
+  principles:
+    - "Feature-first organization"
+    - "Standalone Angular components only"
+    - "Zoneless change detection"
+    - "NgRx SignalStore for feature state"
+    - "OnPush change detection for components"
+    - "Configuration-driven behavior"
+    - "Virtualized rendering for large datasets"
+    - "Bounded in-memory windows"
+    - "Native/Tauri processing for heavy local data operations"
+    - "REST contract compatibility with supplied Spring Boot APIs"
+    - "Direct-to-object-storage upload for large payloads when presigned APIs are available"
+    - "No distributed-monolith coupling through shared domain models"
+  boundaries:
+    angular:
+      owns:
+        - "UI"
+        - "user interaction"
+        - "view state"
+        - "small bounded client caches"
+        - "HTTP orchestration"
+      must_not_own:
+        - "millions of records as permanent JS arrays"
+        - "long-running CPU work"
+        - "large file proxying when direct upload is supported"
+    tauri_rust:
+      owns:
+        - "native filesystem access"
+        - "bounded local-data queries"
+        - "large local dataset access"
+        - "IPC commands"
+        - "stream/chunk orchestration"
+      must_not_own:
+        - "UI presentation logic"
+        - "Angular state"
+    backend:
+      contract_source: "repository OpenAPI specification"
+      rule: "Never invent an endpoint, request field, response field, or status code."
+
+hard_rules:
+  code_generation:
+    no_hard_coded_urls: true
+    no_hard_coded_ports: true
+    no_hard_coded_theme_colors: true
+    no_hard_coded_pagination_sizes: true
+    no_hard_coded_retry_policy: true
+    no_hard_coded_feature_flags: true
+    no_environment_logic_in_business_components: true
+    runtime_config_file: "src/assets/config/app-config.json"
+    runtime_config_service: "src/app/core/config/app-config.service.ts"
+  angular:
+    standalone_only: true
+    ngmodules_forbidden: true
+    constructor_injection_forbidden: true
+    preferred_dependency_injection: "inject()"
+    zoneless_required: true
+    onpush_required_for_ui_components: true
+    signals_preferred_for_local_component_state: true
+    observables_preferred_for_async_streams: true
+    subscribe_in_templates: true
+    manual_subscribe_in_components_only_when_lifecycle_is_explicit: true
+  state:
+    library: "@ngrx/signals"
+    architecture: "feature-level SignalStore"
+    global_store_anti_pattern: true
+    normalize_large_dataset: true
+    never_store_all_millions_of_rows_in_signal_state: true
+  tauri:
+    version: "2.x"
+    invoke_import: "@tauri-apps/api/core"
+    event_import: "@tauri-apps/api/event"
+    v1_api_imports_forbidden: true
+    unknown_api_comment: "// verify in docs"
+    command_names_must_be_explicit: true
+    ipc_payloads_must_be_bounded: true
+  performance:
+    giant_ngfor_forbidden: true
+    cdk_virtual_scrolling_required_for_massive_tables: true
+    trackby_required: true
+    stable_row_identity_required: true
+    bounded_cache_required: true
+    drop_old_rows_from_js_heap: true
+    avoid_full_dataset_clone: true
+    avoid_nested_array_map_on_millions_of_rows: true
+    avoid_json_stringify_large_dataset: true
+    avoid_deep_clone_large_dataset: true
+    avoid_repeated_change_detection_triggers: true
+
+performance_sla:
+  primary_goal:
+    dataset_size_rows: 2000000
+    target_initial_data_ready_seconds: "<= 8"
+    target_ttfr_seconds: "<= 1.5"
+    target_time_to_first_visible_rows_seconds: "<= 1.5"
+    ui_must_remain_responsive: true
+  rendering:
+    active_dom_rows_target: "<= 150"
+    default_row_height_px: "from runtime config only"
+    rendered_window_rows: "from runtime config only"
+    retained_js_rows: "from runtime config only"
+    no_full_dataset_dom_materialization: true
+  interaction:
+    scroll_must_not_block_main_thread: true
+    filter_input_must_not_scan_2m_rows_in_angular: true
+    sort_of_2m_rows_in_angular_forbidden: true
+    expensive_work_must_be_native_or_backend: true
+  measurement:
+    record:
+      - "TTFR"
+      - "time_to_first_100_rows"
+      - "scroll_jank"
+      - "long_task_count"
+      - "heap_growth"
+      - "visible_dom_nodes"
+      - "API latency"
+      - "native query latency"
+    failure_policy: "If a change regresses the agreed SLA, do not merge without an explicit architecture decision."
+
+large_dataset_strategy:
+  canonical_path:
+    - "Persistent/native store"
+    - "bounded range query"
+    - "chunked IPC/event delivery"
+    - "SignalStore bounded cache"
+    - "CDK virtual viewport"
+    - "small DOM window"
+  defaults:
+    request_chunk_rows: "runtime config"
+    native_window_rows: "runtime config"
+    native_retain_rows: "runtime config"
+  pagination:
+    principle: "Pagination/windowing is a memory control mechanism, not merely a UI feature."
+    query_shape: "LIMIT + OFFSET or keyset pagination, selected based on backend/native store characteristics"
+  cache:
+    maximum_size: "runtime config"
+    eviction: "remove rows outside retained window"
+    mutation: "never mutate shared row objects in place"
+  streaming:
+    frontend: "Observable/event stream"
+    native: "bounded chunks"
+    rule: "Never emit the entire dataset in one IPC payload."
+
+configuration:
+  file: "src/assets/config/app-config.json"
+  loading: "runtime"
+  bootstrap_blocking: true
+  required_sections:
+    - "springBoot"
+    - "auth"
+    - "retry"
+    - "virtualScroll"
+    - "pagination"
+    - "upload"
+    - "features"
+    - "theme"
+  access:
+    service: "AppConfigService"
+    rule: "Components must not parse app-config.json directly."
+  changes:
+    rule: "If behavior can vary by environment, deployment, customer, capacity, UX policy, or feature rollout, make it config-driven."
+
+api_contract:
+  source: "OpenAPI specification in repository"
+  verification:
+    before_new_endpoint: "Search OpenAPI first"
+    before_new_request_field: "Search OpenAPI first"
+    before_new_response_field: "Search OpenAPI first"
+    before_new_status_code: "Search OpenAPI first"
+  forbidden:
+    - "invented REST routes"
+    - "silent field renaming"
+    - "client-side assumptions about undocumented response fields"
+    - "generic any payloads when a contract type can be defined"
+  client:
+    service: "ApiClientService"
+    responsibilities:
+      - "dynamic base URL"
+      - "typed request/response contracts"
+      - "HTTP error normalization"
+      - "safe retry policy"
+  retry:
+    default: "GET only"
+    do_not_retry:
+      - "POST"
+      - "PUT"
+      - "PATCH"
+      - "DELETE"
+      - "presigned upload PUT unless the upload flow explicitly handles retry semantics"
+    statuses_from_runtime_config: true
+
+upload_architecture:
+  preferred_large_file_pattern: "presigned direct upload"
+  flow:
+    - "POST upload initiation"
+    - "receive upload id + signed URL"
+    - "PUT bytes directly to object storage"
+    - "POST completion"
+    - "backend validates object existence"
+  rule: "Do not proxy large upload bytes through Angular API services when a presigned/direct path is available."
+  idempotency_required: true
+
+angular_component_rules:
+  selector_prefix: "idu-"
+  component_requirements:
+    - "standalone: true"
+    - "ChangeDetectionStrategy.OnPush"
+    - "typed inputs/outputs"
+    - "trackBy for repeated large lists"
+    - "accessible keyboard/focus behavior"
+    - "small template expressions"
+  forbidden:
+    - "business logic in templates"
+    - "HTTP calls directly from templates"
+    - "constructor-based dependency injection"
+    - "global mutable arrays"
+    - "manual DOM manipulation unless justified by a native integration boundary"
+  template_rules:
+    - "Use @if/@for/@switch where appropriate"
+    - "Do not call expensive functions from templates"
+    - "Do not create new arrays/objects in template expressions"
+
+signalstore_rules:
+  folder: "src/app/features/<feature>/store/"
+  state_design:
+    - "Keep state minimal"
+    - "Keep derived values in computed signals"
+    - "Expose intent-driven methods"
+    - "Do not expose mutable internal collections"
+  large_data:
+    - "Store rows by stable index/id only for the active window"
+    - "Track total count separately"
+    - "Evict stale rows explicitly"
+    - "Deduplicate concurrent window requests"
+  errors:
+    - "Store normalized error state"
+    - "Do not swallow IPC/API errors"
+
+http_rules:
+  interceptor_order:
+    - "runtime URL"
+    - "authentication"
+    - "logging/telemetry"
+    - "retry"
+  auth:
+    rule: "Token retrieval must go through AuthTokenService."
+  logging:
+    forbidden:
+      - "PAN"
+      - "TAN"
+      - "full email"
+      - "full mobile number"
+      - "authentication token"
+      - "sensitive document contents"
+    rule: "Log identifiers only when policy permits and mask sensitive values."
+  errors:
+    rule: "Normalize HTTP errors once; components consume typed error state."
+
+security:
+  principles:
+    - "least privilege"
+    - "role-based authorization"
+    - "sensitive-data masking"
+    - "no secrets in repository"
+    - "no credentials in runtime config"
+    - "audit significant user actions"
+  sensitive_data:
+    examples:
+      - "PAN"
+      - "TAN"
+      - "ITDREIN"
+      - "mobile"
+      - "email"
+      - "taxpayer information"
+  rule: "Never add sensitive fields to logs, analytics, debug output, or error messages without an explicit requirement."
+
+rust_rules:
+  commands:
+    folder: "src-tauri/src/commands/"
+    requirements:
+      - "small command surface"
+      - "typed arguments"
+      - "typed responses"
+      - "bounded payloads"
+      - "explicit error conversion"
+  data:
+    rule: "Rust owns heavy local queries and native streaming."
+    never_return_all_rows_to_webview: true
+  filesystem:
+    rule: "Use Tauri path/resource APIs instead of hard-coded filesystem paths."
+  config:
+    rule: "Native code may parse bundled runtime config, but business components must consume config through their designated service/bridge."
+
+repository_navigation:
+  context_files:
+    root:
+      - "AI_CODING_STANDARDS.yml"
+      - "docs/AI_CONTEXT.md"
+      - "docs/FRONTEND_ARCHITECTURE.md"
+    frontend:
+      - "src/app/app.config.ts"
+      - "src/app/app.routes.ts"
+      - "src/app/core/config/app-config.service.ts"
+      - "src/app/core/api/api-client.service.ts"
+      - "src/app/core/bridge/tauri-bridge.service.ts"
+    massive_data:
+      - "src/app/features/data-upload/store/"
+      - "src/app/features/virtual-table/"
+    native:
+      - "src-tauri/src/commands/"
+      - "src-tauri/src/main.rs"
+  feature_context_rule: >-
+    Before modifying a feature, create or update a small feature-local CONTEXT.md containing
+    purpose, public symbols, state shape, API contracts, performance constraints, and test commands.
+
+change_safety:
+  before_change:
+    - "Check git diff"
+    - "Identify owning module"
+    - "Search symbol references"
+    - "Check API contract"
+    - "Check configuration source"
+  after_change:
+    required:
+      - "format"
+      - "typecheck/build"
+      - "targeted unit tests"
+      - "lint if configured"
+    performance_required_when:
+      - "virtual table changes"
+      - "SignalStore changes involving large collections"
+      - "IPC changes"
+      - "CSV/import processing changes"
+      - "filter/search/sort changes"
+      - "upload throughput changes"
+  small_diff_preferred: true
+  avoid_unrelated_refactors: true
+
+quality_gates:
+  compile:
+    command: "npm run build"
+    must_pass: true
+  tests:
+    command: "npm test"
+    must_pass: true
+  tauri:
+    command: "npm run tauri:build"
+    must_pass_for_release: true
+  architectural_checks:
+    - "No NgModule"
+    - "No constructor injection"
+    - "No Tauri v1 imports"
+    - "No hard-coded backend URLs"
+    - "No hard-coded pagination/window constants"
+    - "No giant *ngFor for massive datasets"
+    - "No unbounded row cache"
+    - "No undocumented API usage"
+  performance_gate:
+    ttfr_seconds_max: 1.5
+    initial_data_ready_seconds_max: 8
+    ui_freeze_max_ms: 100
+    active_dom_row_max: 150
+    rule: "Any violation is a release blocker until profiled and explicitly accepted."
+
+code_review_checklist:
+  - "Does the change respect runtime configuration?"
+  - "Does the change preserve the supplied API contract?"
+  - "Could this create an unbounded array/cache?"
+  - "Could this trigger change detection repeatedly?"
+  - "Could this put large work on the WebView main thread?"
+  - "Could this increase active DOM nodes?"
+  - "Does this alter IPC payload size?"
+  - "Does this expose sensitive data in logs?"
+  - "Does this require updating a feature-local CONTEXT.md?"
+  - "Are tests and performance measurements updated?"
+
+ai_response_contract:
+  when_coding:
+    output_sections:
+      - "Plan"
+      - "Files to change"
+      - "Implementation"
+      - "Validation"
+      - "Performance impact"
+      - "Risks/assumptions"
+  when_uncertain:
+    rules:
+      - "Do not invent an API"
+      - "Do not invent a backend field"
+      - "Do not invent a Tauri API"
+      - "Write '// verify in docs' where verification is required"
+      - "Ask for the smallest missing contract rather than reading the entire repository"
+  context_efficiency:
+    rule: "Prefer exact file/symbol references over copying large source files into the prompt."
+    target: "A feature change should normally be understandable from <= 12 context files."
+
+forbidden_patterns:
+  - "document.querySelector for normal Angular UI"
+  - "setInterval polling when an event/stream exists"
+  - "JSON.stringify of the entire 2M-row dataset"
+  - "Array.prototype.map/filter/reduce over all 2M rows in response to every scroll/filter event"
+  - "deep clone of massive row collections"
+  - "BehaviorSubject containing all 2M rows"
+  - "NgRx store containing all 2M rows"
+  - "*ngFor rendering all records"
+  - "hard-coded http://localhost URLs in source code"
+  - "hard-coded 20/50/100/1000/2000 pagination constants outside config"
+  - "secrets in app-config.json"
+  - "Tauri v1 APIs"
+  - "NgModule"
+  - "constructor injection"
+
+preferred_patterns:
+  - "inject()"
+  - "provideZonelessChangeDetection()"
+  - "provideAppInitializer()"
+  - "signalStore()"
+  - "ChangeDetectionStrategy.OnPush"
+  - "CdkVirtualScrollViewport"
+  - "stable trackBy identity"
+  - "bounded native query"
+  - "typed IPC"
+  - "Observable event streams"
+  - "runtime configuration"
+  - "small feature-local context files"
+
+maintenance:
+  update_this_file_when:
+    - "Architecture changes"
+    - "SLA changes"
+    - "API contract changes"
+    - "Tauri major version changes"
+    - "Angular major version changes"
+    - "State-management architecture changes"
+  rule: "The standards file and feature-local context files must evolve with the architecture."

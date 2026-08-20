@@ -143,8 +143,14 @@ export class ApiService {
 
   describeError(error: unknown): string {
     if (error instanceof HttpErrorResponse) {
+      if (error.status === 0) {
+        return 'Unable to connect to the server. Please ensure the backend service is running and try again.';
+      }
       const api = error.error as { message?: string; code?: string } | undefined;
       return api?.message || api?.code || `Request failed with HTTP ${error.status}.`;
+    }
+    if (error instanceof Error && (error.message === 'Failed to fetch' || error.message.includes('NetworkError') || error.message.includes('ERR_CONNECTION_REFUSED'))) {
+      return 'Unable to connect to the server. Please ensure the backend service is running and try again.';
     }
     return error instanceof Error ? error.message : 'An unexpected error occurred.';
   }

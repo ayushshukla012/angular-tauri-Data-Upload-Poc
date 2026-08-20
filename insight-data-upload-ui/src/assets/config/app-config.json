@@ -1,0 +1,30 @@
+{
+  "springBoot": {
+    "baseUrl": "http://localhost:8081",
+    "paths": {
+      "health": "/actuator/health",
+      "submitPacket": "/api/v1/packets",
+      "submitCase": "/api/v1/cases",
+      "initiateUpload": "/api/v1/uploads/initiate",
+      "presignPart": "/api/v1/uploads/{uploadId}/parts/{partNumber}/presign",
+      "listParts": "/api/v1/uploads/{uploadId}/parts",
+      "completeUpload": "/api/v1/uploads/{uploadId}/complete"
+    }
+  },
+  "application": {
+    "governmentWebsiteUrl": "https://www.incometaxindia.gov.in/"
+  },
+  "features": {},
+  "virtualScroll": {
+    "rowHeightPx": 40,
+    "bufferRows": 20
+  },
+  "pagination": {
+    "defaultPageSize": 50
+  },
+  "tooling": {
+    "devServerHost": "localhost",
+    "devServerPort": 4200,
+    "devUrlHost": "http://localhost"
+  }
+}

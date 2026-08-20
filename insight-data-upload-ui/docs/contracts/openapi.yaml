@@ -1,0 +1,706 @@
+openapi: 3.0.3
+info:
+  title: Upload Service API
+  description: |
+    Brokers presigned, direct-to-storage file uploads (single-shot and multipart/resumable).
+    The service never touches file bytes — clients PUT directly to object storage using the
+    presigned URLs this API hands out, then call `complete` to trigger downstream processing.
+
+    See `docs/PRESIGNED_UPLOADS.md` and `docs/resumable-uploads.md` in the repo for the full
+    design rationale.
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8081
+    description: Local development
+
+tags:
+  - name: uploads
+    description: Upload lifecycle — initiate, upload parts, complete, check status
+  - name: cases
+    description: >-
+      ITD case ingestion (insight-javafs's Cases tab) — case metadata plus the documents
+      attached to it. Each document is a normal upload (see the `uploads` endpoints below),
+      linked to its case via `caseId` on `initiate`.
+  - name: packets
+    description: >-
+      Packet/Batch — the legacy app's "Packet Details" screen (batch number + submitting person),
+      kept as a grouping + submitter-metadata concept only. No XML/package generation exists in
+      this platform; a case's `batchNumber` just references one of these.
+
+paths:
+  /api/v1/packets:
+    post:
+      tags: [packets]
+      summary: Submit a packet's (batch's) details
+      description: |
+        Idempotent, same reasoning as `POST /api/v1/cases`: resubmitting the same `batchNumber`
+        (the client's offline-reconnect retry) returns the existing packet unchanged.
+      operationId: submitPacket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitPacketRequest'
+      responses:
+        '201':
+          description: Packet accepted (or, if `batchNumber` already existed, the existing packet returned as-is)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PacketResponse'
+        '400':
+          description: Validation failure (e.g. blank `submittingPersonName`/`submittingPersonMobile`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/packets/{batchNumber}:
+    get:
+      tags: [packets]
+      summary: Get packet details
+      operationId: getPacket
+      parameters:
+        - name: batchNumber
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current packet details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PacketResponse'
+        '404':
+          description: Packet not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/cases:
+    post:
+      tags: [cases]
+      summary: Submit a case's metadata
+      description: |
+        The direct-API replacement for the legacy XML-manifest handoff: the desktop client calls
+        this once a case's mandatory fields validate locally, then attaches documents via
+        `POST /api/v1/uploads/initiate` with this case's id. Idempotent — resubmitting the same
+        `caseId` (the client's automatic offline-reconnect retry) returns the existing case
+        unchanged rather than erroring, since duplicate submission is expected, not a conflict.
+      operationId: submitCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitCaseRequest'
+      responses:
+        '201':
+          description: Case accepted (or, if `caseId` already existed, the existing case returned as-is)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseResponse'
+        '400':
+          description: Validation failure (e.g. malformed `sourcePan`/`mobileNumber`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/cases/{caseId}:
+    get:
+      tags: [cases]
+      summary: Get case status
+      operationId: getCase
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        '200':
+          description: Current case status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseResponse'
+        '404':
+          description: Case not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/cases/{caseId}/documents:
+    get:
+      tags: [cases]
+      summary: List documents attached to a case
+      operationId: listCaseDocuments
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        '200':
+          description: Documents attached to this case, each backed by an upload
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CaseDocumentResponse'
+        '404':
+          description: Case not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/uploads/initiate:
+    post:
+      tags: [uploads]
+      summary: Initiate an upload
+      description: |
+        Step 1 of the upload flow. Depending on `fileSizeBytes` relative to the server's
+        configured multipart threshold, the server either issues a single presigned PUT URL
+        (small files) or starts a multipart upload (large files) — see
+        `docs/resumable-uploads.md`. The client then PUTs its file bytes directly to storage,
+        not to this service. Pass `caseId` (+ optionally `docLabel`/`docType`/`description`/
+        `remarks` — the legacy app's Documents grid columns) to link this upload to an ITD case
+        already submitted via `POST /api/v1/cases` — omit all of these for a plain upload.
+        Supported file types are inferred from the extension — the legacy app's full allow-list
+        (its Instructions screen, §11): `csv`, `xlsx`/`xls`, `json` (original data-file types);
+        Image: `gif`, `png`, `jpg`/`jpeg`, `tif`/`tiff`, `bmp`; Document: `pdf`, `doc`/`docx`,
+        `ppt`/`pptx`, `txt`, `odt`; Audio/Video: `mp3`, `m4a`, `wav`, `mpeg`, `mpg`, `wmv`, `mp4`,
+        `m4v`, `mov`, `avi`, `swf`; Others: `xml`, `xslt`, `zip`, `gz`/`tgz`/`tar.gz`, `epub`,
+        `rar`, `7z`.
+      operationId: initiate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiateUploadRequest'
+      responses:
+        '201':
+          description: Upload initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitiateUploadResponse'
+        '400':
+          description: >-
+            Validation failure (e.g. blank `fileName`, non-positive `fileSizeBytes`), or an
+            unrecognized file extension (`UNSUPPORTED_FILE_TYPE`) — deterministic, not worth
+            retrying without changing the file.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/uploads/{uploadId}/parts/{partNumber}/presign:
+    post:
+      tags: [uploads]
+      summary: Presign one multipart upload part
+      description: |
+        Multipart uploads only. Returns a presigned URL for exactly one part, generated on
+        demand right before the client uploads it — not all parts upfront — so a long-lived
+        session never hits URL expiry. Only valid for uploads that initiated in multipart mode.
+      operationId: presignPart
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+        - name: partNumber
+          in: path
+          required: true
+          description: 1-based part number (S3/MinIO multipart limit is 10,000 parts per upload).
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        '200':
+          description: Presigned part URL issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignPartResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Upload did not initiate as a multipart upload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/uploads/{uploadId}/parts:
+    get:
+      tags: [uploads]
+      summary: List uploaded parts
+      description: |
+        Multipart uploads only. Resume entry point — queries the object store's `ListParts`
+        directly (the source of truth) and returns which part numbers already landed, with
+        their sizes and ETags. A client resuming a broken session only re-uploads what's
+        missing from this list.
+      operationId: listParts
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '200':
+          description: Parts already uploaded to storage for this upload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadPartsResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Upload did not initiate as a multipart upload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/uploads/{uploadId}/complete:
+    post:
+      tags: [uploads]
+      summary: Complete an upload
+      description: |
+        Step 2 of the upload flow — call once the direct-to-storage upload succeeds (the single
+        PUT, or every part of a multipart upload). This is what starts the downstream saga: the
+        server verifies the file actually landed in storage (single-shot), or that part sizes
+        sum to the declared `fileSizeBytes` and assembles the object via `CompleteMultipartUpload`
+        (multipart), then flips status to `RECEIVED` and records an outbox event that gets
+        published to Kafka within ~1 second.
+      operationId: complete
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '200':
+          description: Upload completed and downstream processing triggered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: >-
+            Upload is not ready to complete — no file found in storage yet, or (multipart)
+            uploaded part sizes don't sum to the declared `fileSizeBytes`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/uploads/{uploadId}:
+    get:
+      tags: [uploads]
+      summary: Get upload status
+      operationId: getStatus
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+      responses:
+        '200':
+          description: Current upload status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+components:
+  parameters:
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      description: ID returned by `POST /api/v1/uploads/initiate`.
+      schema:
+        type: string
+
+    CaseId:
+      name: caseId
+      in: path
+      required: true
+      description: The natural case identifier supplied to `POST /api/v1/cases` (e.g. "CASE-1001").
+      schema:
+        type: string
+
+  schemas:
+    InitiateUploadRequest:
+      type: object
+      required: [fileName, fileSizeBytes]
+      properties:
+        fileName:
+          type: string
+          example: sample.csv
+        fileSizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 20971520
+        caseId:
+          type: string
+          nullable: true
+          description: Set only to attach this upload to an ITD case as one of its documents.
+        docLabel:
+          type: string
+          nullable: true
+          description: >-
+            Optional, only meaningful alongside `caseId` — a human-readable label for this
+            document ("Document Name" on the legacy app's Documents grid).
+        docType:
+          type: string
+          nullable: true
+          description: Optional, only meaningful alongside `caseId` — the legacy Documents grid's "Document Type".
+        description:
+          type: string
+          nullable: true
+          description: Optional, only meaningful alongside `caseId`.
+        remarks:
+          type: string
+          nullable: true
+          description: Optional, only meaningful alongside `caseId`.
+
+    SubmitPacketRequest:
+      type: object
+      required: [batchNumber, submittingPersonName, submittingPersonMobile]
+      properties:
+        batchNumber:
+          type: string
+          description: The natural batch identifier (e.g. from a physical file/note sheet).
+        description:
+          type: string
+          nullable: true
+        submittingPersonName:
+          type: string
+        submittingPersonAddress:
+          type: string
+          nullable: true
+        submittingPersonMobile:
+          type: string
+        submittingPersonEmail:
+          type: string
+          nullable: true
+
+    PacketResponse:
+      allOf:
+        - $ref: '#/components/schemas/SubmitPacketRequest'
+        - type: object
+          required: [approvalStatus, createdAt]
+          properties:
+            approvalStatus:
+              $ref: '#/components/schemas/ApprovalStatus'
+            createdAt:
+              type: string
+              format: date-time
+
+    ApprovalStatus:
+      type: string
+      description: Approval-workflow state, tracked independently of processing/upload status. Defaults to PENDING on creation; set only through the approval workflow (not client-settable at submit time).
+      enum: [PENDING, APPROVED, REJECTED]
+
+    # Mirrors the legacy "Verification Report Upload Utility"'s Verification Result screen
+    # field-for-field — caseId is the VSN. Only the identity fields are required here; the rest
+    # are enforced by the categorized (Mandatory/Defect/Exception) validator, not this schema.
+    SubmitCaseRequest:
+      type: object
+      required: [caseId, sourcePan, name, mobileNumber, designation]
+      properties:
+        caseId:
+          type: string
+          example: CASE-1001
+          description: The VSN (Verification Sequence Number).
+        referenceNumber:
+          type: string
+          nullable: true
+        sourcePan:
+          type: string
+          example: ABCDE1234F
+        name:
+          type: string
+        dateOfBirth:
+          type: string
+          nullable: true
+          description: Free-text, legacy format DD-MM-YYYY (not a strict date type).
+        address:
+          type: string
+          nullable: true
+        stateUtCode:
+          type: string
+          nullable: true
+        pincode:
+          type: string
+          nullable: true
+        mobileNumber:
+          type: string
+          example: "9876543210"
+        email:
+          type: string
+          nullable: true
+        designation:
+          type: string
+        informationFy:
+          type: string
+          nullable: true
+          description: Financial Year of the primary information.
+        informationSourceType:
+          type: string
+          nullable: true
+        informationSourceDescription:
+          type: string
+          nullable: true
+        informationType:
+          type: string
+          nullable: true
+        informationDescription:
+          type: string
+          nullable: true
+        informationValue:
+          type: string
+          nullable: true
+        natureOfVerification:
+          type: string
+          nullable: true
+        actionableAy:
+          type: string
+          nullable: true
+          description: Assessment Year in which action is to be taken.
+        verificationResultType1:
+          type: string
+          nullable: true
+          description: Primary result.
+        verificationResultDescription1:
+          type: string
+          nullable: true
+        verificationResultValue1:
+          type: string
+          nullable: true
+        verificationResultType2:
+          type: string
+          nullable: true
+          description: Secondary result.
+        verificationResultDescription2:
+          type: string
+          nullable: true
+        verificationResultValue2:
+          type: string
+          nullable: true
+        verificationResultType3:
+          type: string
+          nullable: true
+          description: Other result.
+        verificationResultDescription3:
+          type: string
+          nullable: true
+        verificationResultValue3:
+          type: string
+          nullable: true
+        remarks:
+          type: string
+          nullable: true
+        batchNumber:
+          type: string
+          nullable: true
+          description: The Packet this case belongs to — must already exist via `POST /api/v1/packets`.
+        extraFields:
+          type: object
+          additionalProperties:
+            type: string
+          description: Any extra columns the source CSV/form included beyond the mandatory fields.
+
+    CaseResponse:
+      allOf:
+        - $ref: '#/components/schemas/SubmitCaseRequest'
+        - type: object
+          required: [status, approvalStatus, createdAt]
+          properties:
+            status:
+              $ref: '#/components/schemas/CaseStatus'
+            approvalStatus:
+              $ref: '#/components/schemas/ApprovalStatus'
+            errorMessage:
+              type: string
+              nullable: true
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+              nullable: true
+
+    CaseStatus:
+      type: string
+      description: >-
+        `COMPLETED` means every document currently attached to the case has reached `RECEIVED` in
+        this service — it does not imply the cross-service saga (transformation/OCR/reporting) has
+        finished, since orchestrator-service doesn't track cases at all yet.
+      enum: [RECEIVED, PROCESSING, COMPLETED, FAILED]
+
+    CaseDocumentResponse:
+      type: object
+      required: [uploadId, status, approvalStatus]
+      properties:
+        uploadId:
+          type: string
+        docLabel:
+          type: string
+          nullable: true
+        docType:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        remarks:
+          type: string
+          nullable: true
+        fileName:
+          type: string
+        status:
+          $ref: '#/components/schemas/UploadStatus'
+        approvalStatus:
+          $ref: '#/components/schemas/ApprovalStatus'
+
+    InitiateUploadResponse:
+      type: object
+      description: >-
+        `uploadUrl`/`contentType` are present only when `multipart` is false; `minPartSizeBytes`
+        and `recommendedPartSizeBytes` are present only when `multipart` is true.
+      required: [uploadId, multipart, expiresAt]
+      properties:
+        uploadId:
+          type: string
+        multipart:
+          type: boolean
+        uploadUrl:
+          type: string
+          nullable: true
+          description: Single-shot mode only — PUT the whole file here directly.
+        contentType:
+          type: string
+          nullable: true
+          description: >-
+            Single-shot mode only. The exact Content-Type header value the client's PUT must send —
+            this is what the server signed the presigned URL with, so sending anything else (or
+            deriving one independently) causes S3/MinIO to reject the PUT with SignatureDoesNotMatch
+            (403).
+        minPartSizeBytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Multipart mode only. `max(5MB, ceil(fileSizeBytes / 10000))` — the floor a client's
+            adaptive part sizing must not go below.
+        recommendedPartSizeBytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: Multipart mode only. Starting part size for the client's first part.
+        expiresAt:
+          type: string
+          format: date-time
+
+    PresignPartResponse:
+      type: object
+      required: [partNumber, uploadUrl, expiresAt]
+      properties:
+        partNumber:
+          type: integer
+          format: int32
+        uploadUrl:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    UploadPartsResponse:
+      type: object
+      required: [parts]
+      properties:
+        parts:
+          type: array
+          items:
+            $ref: '#/components/schemas/UploadedPartSummary'
+
+    UploadedPartSummary:
+      type: object
+      required: [partNumber, eTag, sizeBytes]
+      properties:
+        partNumber:
+          type: integer
+          format: int32
+        eTag:
+          type: string
+        sizeBytes:
+          type: integer
+          format: int64
+
+    UploadResponse:
+      type: object
+      required: [uploadId, fileName, fileType, status, createdAt]
+      properties:
+        uploadId:
+          type: string
+        fileName:
+          type: string
+        fileType:
+          type: string
+          example: CSV
+        status:
+          $ref: '#/components/schemas/UploadStatus'
+        createdAt:
+          type: string
+          format: date-time
+
+    UploadStatus:
+      type: string
+      description: >-
+        `PENDING` is an internal-only state (presigned URL issued, file not yet received) —
+        never returned before the client has at least called `complete`.
+      enum: [PENDING, RECEIVED, VALIDATING, PROCESSING, COMPLETED, FAILED]
+
+    ApiError:
+      type: object
+      required: [code, message, timestamp, fieldErrors]
+      properties:
+        code:
+          type: string
+          example: UPLOAD_NOT_COMPLETED
+        message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        fieldErrors:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+    FieldError:
+      type: object
+      required: [field, reason]
+      properties:
+        field:
+          type: string
+        reason:
+          type: string

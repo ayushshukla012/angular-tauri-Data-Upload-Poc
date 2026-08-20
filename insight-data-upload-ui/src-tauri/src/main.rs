@@ -9,8 +9,9 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
 
+mod commands;
+
 const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024;
-const DEFAULT_PAGE_SIZE: i64 = 25;
 
 #[derive(Debug, Serialize)]
 struct PickedFile {
@@ -30,6 +31,7 @@ struct PickedDocument {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct StoredDraftFile {
     id: String,
     name: String,
@@ -85,7 +87,7 @@ struct StoredDraftFileResponse {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct NativeInformationDetails {
+pub struct NativeInformationDetails {
     information_fy: String, information_source_type: String, information_source_description: String, information_type: String,
     information_description: String, information_value: String, source: String, finding: String,
 }
@@ -97,7 +99,7 @@ struct NativeInformationDetailsInput {
 }
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct NativeVerificationDetails {
+pub struct NativeVerificationDetails {
     actionable_ay: String, statutory_reason: String, verification_result_type: String, income_escaping_assessment_value: String, information_value: String, result_description: String,
 }
 #[derive(Debug, Deserialize)]
@@ -107,7 +109,7 @@ struct NativeVerificationDetailsInput {
 }
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct NativePersonRow {
+pub struct NativePersonRow {
     serial_no: String, case_id: String, pan: String, name: String, dob_doi: String, mobile: String, email: String, pin_code: String, address: String, state: String,
     verification_status: String, information_details: NativeInformationDetails, verification_details: NativeVerificationDetails,
 }
@@ -250,7 +252,7 @@ fn ensure_metadata_columns(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn connection(app: &tauri::AppHandle) -> Result<Connection, String> {
+pub(crate) fn connection(app: &tauri::AppHandle) -> Result<Connection, String> {
     let path = db_path(app)?;
     let conn = Connection::open(path).map_err(|e| format!("Unable to open SQLite database: {e}"))?;
     conn.execute_batch(
@@ -431,7 +433,7 @@ fn clear_dataset(conn: &Connection, dataset_id: &str) -> Result<(), String> {
 
 const ROW_SELECT: &str = "SELECT serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description FROM imported_rows";
 
-fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<NativePersonRow> {
+pub(crate) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<NativePersonRow> {
     Ok(NativePersonRow {
         serial_no: row.get(0)?, case_id: row.get(1)?, pan: row.get(2)?, name: row.get(3)?, dob_doi: row.get(4)?, mobile: row.get(5)?, email: row.get(6)?, pin_code: row.get(7)?, address: row.get(8)?, state: row.get(9)?, verification_status: row.get(10)?,
         information_details: NativeInformationDetails { information_fy: row.get(11)?, information_source_type: row.get(12)?, information_source_description: row.get(13)?, information_type: row.get(14)?, information_description: row.get(15)?, information_value: row.get(16)?, source: row.get(17)?, finding: row.get(18)? },
@@ -731,13 +733,15 @@ fn get_app_version() -> String {
 }
 
 #[tauri::command]
-fn open_government_website() -> Result<(), String> {
-    const URL: &str = "https://www.incometaxindia.gov.in/";
+fn open_government_website(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Configured government website URL must use http or https.".to_string());
+    }
 
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
-            .args(["/C", "start", "", URL])
+            .args(["/C", "start", "", &url])
             .spawn()
             .map_err(|e| format!("Unable to open the Government of India website: {e}"))?;
     }
@@ -745,7 +749,7 @@ fn open_government_website() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(URL)
+            .arg(&url)
             .spawn()
             .map_err(|e| format!("Unable to open the Government of India website: {e}"))?;
     }
@@ -753,7 +757,7 @@ fn open_government_website() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("xdg-open")
-            .arg(URL)
+            .arg(&url)
             .spawn()
             .map_err(|e| format!("Unable to open the Government of India website: {e}"))?;
     }
@@ -776,6 +780,7 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_row_page,get_row_by_case_id,
+            commands::data_commands::get_runtime_config,commands::data_commands::get_row_window,commands::data_commands::stream_row_window,
             upsert_row,delete_rows,set_rows_status,clear_row_store,clone_row_store,rename_row_store,seed_row_store,export_csv_file,
             save_draft,list_drafts,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website
         ])

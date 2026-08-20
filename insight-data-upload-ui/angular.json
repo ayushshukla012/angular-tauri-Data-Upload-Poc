@@ -15,13 +15,23 @@
           "options": {
             "browser": "src/main.ts",
             "index": "src/index.html",
-            "polyfills": ["zone.js"],
+            "polyfills": [],
             "tsConfig": "tsconfig.app.json",
             "assets": [
-              { "glob": "**/*", "input": "public" },
-              { "glob": "**/*", "input": "src/assets", "output": "assets" }
+              {
+                "glob": "**/*",
+                "input": "public"
+              },
+              {
+                "glob": "**/*",
+                "input": "src/assets",
+                "output": "assets"
+              }
             ],
-            "styles": ["src/styles.css", "src/app/app.component.css"],
+            "styles": [
+              "src/styles.css",
+              "src/app/app.component.css"
+            ],
             "outputPath": "dist/insight-data-upload-ui"
           },
           "configurations": {
@@ -32,8 +42,16 @@
                 }
               },
               "budgets": [
-                { "type": "initial", "maximumWarning": "2mb", "maximumError": "5mb" },
-                { "type": "anyComponentStyle", "maximumWarning": "20kb", "maximumError": "40kb" }
+                {
+                  "type": "initial",
+                  "maximumWarning": "2mb",
+                  "maximumError": "5mb"
+                },
+                {
+                  "type": "anyComponentStyle",
+                  "maximumWarning": "20kb",
+                  "maximumError": "40kb"
+                }
               ],
               "outputHashing": "all"
             },
@@ -48,8 +66,12 @@
         "serve": {
           "builder": "@angular/build:dev-server",
           "configurations": {
-            "production": { "buildTarget": "insight-data-upload-ui:build:production" },
-            "development": { "buildTarget": "insight-data-upload-ui:build:development" }
+            "production": {
+              "buildTarget": "insight-data-upload-ui:build:production"
+            },
+            "development": {
+              "buildTarget": "insight-data-upload-ui:build:development"
+            }
           },
           "defaultConfiguration": "development"
         },
@@ -62,5 +84,7 @@
       }
     }
   },
-  "cli": { "analytics": false }
+  "cli": {
+    "analytics": false
+  }
 }
