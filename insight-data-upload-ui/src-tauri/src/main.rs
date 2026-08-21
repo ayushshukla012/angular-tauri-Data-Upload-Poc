@@ -1008,97 +1008,109 @@ async fn import_csv_to_store(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn get_row_page(
+async fn get_row_page(
     app: tauri::AppHandle,
     dataset_id: String,
     page: i64,
     page_size: i64,
     filter: String,
 ) -> Result<PagedRows, String> {
-    let conn = connection_fast(&app)?;
-    let page_size = page_size.clamp(1, 1000);
-    let page = page.max(1);
-    let offset = (page - 1) * page_size;
-    let term = filter.trim().to_ascii_lowercase();
-    let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = connection_fast(&app)?;
+        let page_size = page_size.clamp(1, 1000);
+        let page = page.max(1);
+        let offset = (page - 1) * page_size;
+        let term = filter.trim().to_ascii_lowercase();
+        let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
 
-    let count: i64 = if term.is_empty() {
-        conn.query_row(
-            "SELECT COALESCE(
-                (SELECT row_count FROM dataset_metadata WHERE dataset_id=?1),
-                (SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1)
-             )",
-            params![dataset_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        conn.query_row(
-            "SELECT COUNT(*)
-             FROM imported_rows
-             WHERE dataset_id=?1
-               AND (
-                 pan LIKE ?2 ESCAPE '\\'
-                 OR name LIKE ?2 ESCAPE '\\'
-                 OR email LIKE ?2 ESCAPE '\\'
-                 OR address LIKE ?2 ESCAPE '\\'
-                 OR state LIKE ?2 ESCAPE '\\'
-                 OR serial_no LIKE ?2 ESCAPE '\\'
-               )",
-            params![dataset_id, like],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?
-    };
+        let count: i64 = if term.is_empty() {
+            conn.query_row(
+                "SELECT COALESCE(
+                    (SELECT row_count FROM dataset_metadata WHERE dataset_id=?1),
+                    (SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1)
+                 )",
+                params![dataset_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*)
+                 FROM imported_rows
+                 WHERE dataset_id=?1
+                   AND (
+                     pan LIKE ?2 ESCAPE '\\'
+                     OR name LIKE ?2 ESCAPE '\\'
+                     OR email LIKE ?2 ESCAPE '\\'
+                     OR address LIKE ?2 ESCAPE '\\'
+                     OR state LIKE ?2 ESCAPE '\\'
+                     OR serial_no LIKE ?2 ESCAPE '\\'
+                   )",
+                params![dataset_id, like],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        };
 
-    let mut stmt = if term.is_empty() {
-        conn.prepare(&format!(
-            "{ROW_SELECT} WHERE dataset_id=?1 ORDER BY row_order LIMIT ?2 OFFSET ?3"
-        ))
-        .map_err(|e| e.to_string())?
-    } else {
-        conn.prepare(&format!(
-            "{ROW_SELECT} WHERE dataset_id=?1
-             AND (
-                 pan LIKE ?4 ESCAPE '\\'
-                 OR name LIKE ?4 ESCAPE '\\'
-                 OR email LIKE ?4 ESCAPE '\\'
-                 OR address LIKE ?4 ESCAPE '\\'
-                 OR state LIKE ?4 ESCAPE '\\'
-                 OR serial_no LIKE ?4 ESCAPE '\\'
-             )
-             ORDER BY row_order LIMIT ?2 OFFSET ?3"
-        ))
-        .map_err(|e| e.to_string())?
-    };
+        let mut stmt = if term.is_empty() {
+            conn.prepare(&format!(
+                "{ROW_SELECT} WHERE dataset_id=?1 ORDER BY row_order LIMIT ?2 OFFSET ?3"
+            ))
+            .map_err(|e| e.to_string())?
+        } else {
+            conn.prepare(&format!(
+                "{ROW_SELECT} WHERE dataset_id=?1
+                 AND (
+                     pan LIKE ?4 ESCAPE '\\'
+                     OR name LIKE ?4 ESCAPE '\\'
+                     OR email LIKE ?4 ESCAPE '\\'
+                     OR address LIKE ?4 ESCAPE '\\'
+                     OR state LIKE ?4 ESCAPE '\\'
+                     OR serial_no LIKE ?4 ESCAPE '\\'
+                 )
+                 ORDER BY row_order LIMIT ?2 OFFSET ?3"
+            ))
+            .map_err(|e| e.to_string())?
+        };
 
-    let rows = if term.is_empty() {
-        stmt.query_map(
-            params![dataset_id, page_size, offset],
-            row_from_sql,
-        )
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?
-    } else {
-        stmt.query_map(
-            params![dataset_id, page_size, offset, like],
-            row_from_sql,
-        )
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?
-    };
+        let rows = if term.is_empty() {
+            stmt.query_map(
+                params![dataset_id, page_size, offset],
+                row_from_sql,
+            )
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+        } else {
+            stmt.query_map(
+                params![dataset_id, page_size, offset, like],
+                row_from_sql,
+            )
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+        };
 
-    Ok(PagedRows {
-        rows,
-        total_count: count as usize,
-    })
+        Ok(PagedRows {
+            rows,
+            total_count: count as usize,
+        })
+    }).await.map_err(|e| e.to_string())?
 }
 #[tauri::command(rename_all = "camelCase")]
-fn get_row_by_case_id(app: tauri::AppHandle,dataset_id:String,case_id:String)->Result<Option<NativePersonRow>,String>{let conn=connection(&app)?;conn.query_row(&format!("{ROW_SELECT} WHERE dataset_id=?1 AND case_id=?2"),params![dataset_id,case_id],row_from_sql).optional().map_err(|e|e.to_string())}
+async fn get_row_by_case_id(app: tauri::AppHandle,dataset_id:String,case_id:String)->Result<Option<NativePersonRow>,String>{
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn=connection(&app)?;
+        conn.query_row(&format!("{ROW_SELECT} WHERE dataset_id=?1 AND case_id=?2"),params![dataset_id,case_id],row_from_sql).optional().map_err(|e|e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
 #[tauri::command(rename_all = "camelCase")]
-fn upsert_row(app: tauri::AppHandle,dataset_id:String,row:NativePersonRowInput)->Result<(),String>{let conn=connection(&app)?;execute_upsert(&conn,&dataset_id,&row)}
+async fn upsert_row(app: tauri::AppHandle,dataset_id:String,row:NativePersonRowInput)->Result<(),String>{
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn=connection(&app)?;
+        execute_upsert(&conn,&dataset_id,&row)
+    }).await.map_err(|e| e.to_string())?
+}
 #[tauri::command(rename_all = "camelCase")]
 fn delete_rows(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>)->Result<(),String>{let conn=connection(&app)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for id in case_ids{tx.execute("DELETE FROM imported_rows WHERE dataset_id=?1 AND case_id=?2",params![dataset_id,id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}
 #[tauri::command(rename_all = "camelCase")]
@@ -1325,6 +1337,18 @@ fn uuid_like() -> String {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                println!("[RUST] Initializing database schema on startup...");
+                if let Err(e) = connection(&handle) {
+                    eprintln!("[RUST] Database initialization error: {}", e);
+                } else {
+                    println!("[RUST] Database schema initialized successfully.");
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_row_page,get_row_by_case_id,
             commands::data_commands::get_runtime_config,commands::data_commands::get_row_window,commands::data_commands::stream_row_window,

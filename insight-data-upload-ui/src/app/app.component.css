@@ -132,3 +132,11 @@ main:focus { outline:2px solid #e4e9f1; outline-offset:5px; }
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
+
+.link-button:disabled,
+.header-links button:disabled,
+.brand:disabled {
+  opacity: 0.45;
+  cursor: not-allowed !important;
+  pointer-events: none;
+}

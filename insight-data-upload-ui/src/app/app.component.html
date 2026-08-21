@@ -12,13 +12,13 @@
   </div>
 
   <header class="brand-header">
-    <button class="brand" type="button" (click)="goHome()" aria-label="Go to home">
+    <button class="brand" type="button" [disabled]="csvImportActive()" (click)="goHome()" aria-label="Go to home">
       <img src="assets/itd-logo.png" alt="Income Tax Department" class="brand-logo">
       <span class="brand-copy"><strong>Data Uploads Utility</strong><small>Government of India</small></span>
     </button>
     <div class="header-links">
-      <button type="button" (click)="openExisting()">Open <span class="plus">＋</span></button>
-      <button type="button" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">Help ⓘ</button>
+      <button type="button" [disabled]="csvImportActive()" (click)="openExisting()">Open <span class="plus">＋</span></button>
+      <button type="button" [disabled]="csvImportActive()" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">Help ⓘ</button>
     </div>
   </header>
 
@@ -92,8 +92,8 @@
         </div>
 
         <div class="footer-actions">
-          <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" (click)="nextFromPacket()">Next</button></div>
+          <button class="link-button" type="button" [disabled]="csvImportActive()" (click)="saveDraft()">▣ Save as Draft</button>
+          <div><button class="outline" type="button" [disabled]="csvImportActive()" (click)="back()">Back</button><button class="primary" type="button" (click)="nextFromPacket()">Next</button></div>
         </div>
       </section>
     </main>
@@ -168,12 +168,14 @@
           </ng-container>
           <button type="button" [disabled]="page() === pageCount()" (click)="setPage(page() + 1)" aria-label="Next page">›</button>
           <span>Showing {{pagedRows().length}} of {{visibleRowCount().toLocaleString()}} items</span>
-          <select [value]="pageSize()" (change)="changePageSize($any($event.target).value)"><option *ngFor="let size of pageSizeOptions" [value]="size">{{size}}</option></select>
+          <select (change)="changePageSize($any($event.target).value)">
+            <option *ngFor="let size of pageSizeOptions" [value]="size" [selected]="pageSize() === size">{{size}}</option>
+          </select>
         </div>
 
         <div class="footer-actions">
-          <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="csvImportActive() || visibleRowCount() === 0" (click)="nextToCreate()">Next</button></div>
+          <button class="link-button" type="button" [disabled]="csvImportActive()" (click)="saveDraft()">▣ Save as Draft</button>
+          <div><button class="outline" type="button" [disabled]="csvImportActive()" (click)="back()">Back</button><button class="primary" type="button" [disabled]="csvImportActive() || visibleRowCount() === 0" (click)="nextToCreate()">Next</button></div>
         </div>
       </section>
     </main>
@@ -192,8 +194,8 @@
         <div class="submit-note"><span>✓</span><div><strong>Ready to submit</strong><p>Packet metadata is sent to <code>/api/v1/packets</code>, cases to <code>/api/v1/cases</code>, and supporting files use the presigned MinIO upload flow.</p></div></div>
         <div class="progress-box" *ngIf="progressMessage()"><span class="spinner" *ngIf="finalSubmitBusy()"></span>{{progressMessage()}}</div>
         <div class="footer-actions">
-          <button class="link-button" type="button" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" (click)="back()">Back</button><button class="primary" type="button" [disabled]="finalSubmitBusy()" (click)="createPacket()">{{finalSubmitBusy() ? 'Creating…' : 'Create Packet'}}</button></div>
+          <button class="link-button" type="button" [disabled]="csvImportActive()" (click)="saveDraft()">▣ Save as Draft</button>
+          <div><button class="outline" type="button" [disabled]="csvImportActive()" (click)="back()">Back</button><button class="primary" type="button" [disabled]="finalSubmitBusy()" (click)="createPacket()">{{finalSubmitBusy() ? 'Creating…' : 'Create Packet'}}</button></div>
         </div>
       </section>
     </main>

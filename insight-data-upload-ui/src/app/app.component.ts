@@ -363,7 +363,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   closeModal(): void {
-    if (this.csvImportActive()) return;
+    if (this.modal() === 'csv' && this.csvImportActive()) return;
     this.modal.set('none');
     this.currentRowIndex.set(null);
     this.csvFile.set(null);
