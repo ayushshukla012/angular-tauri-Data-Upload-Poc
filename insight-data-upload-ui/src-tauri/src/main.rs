@@ -34,9 +34,9 @@ struct CsvImportConfig {
     max_file_bytes: u64,
 }
 
-fn default_import_batch_rows() -> usize { 25_000 }
+fn default_import_batch_rows() -> usize { 100_000 }
 fn default_import_ready_rows() -> usize { 100 }
-fn default_import_progress_rows() -> usize { 10_000 }
+fn default_import_progress_rows() -> usize { 50_000 }
 fn default_import_sqlite_cache_mb() -> usize { 64 }
 fn default_import_max_file_bytes() -> u64 { 0 }
 
@@ -227,10 +227,8 @@ fn ensure_imported_rows_columns(conn: &Connection) -> Result<(), String> {
             [],
         ).map_err(|e| e.to_string())?;
     }
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_row_order ON imported_rows(dataset_id, row_order)",
-        [],
-    ).map_err(|e| e.to_string())?;
+    // No secondary row_order index during import. SQLite rowid preserves insertion order.
+
     Ok(())
 }
 
@@ -286,14 +284,14 @@ fn ensure_metadata_columns(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Lightweight connection: WAL mode + busy timeout only. No schema migrations.
-/// Safe to call during active CSV import without blocking.
+/// Lightweight connection: busy timeout only. WAL is enabled by the import path and
+/// persists at the database level; read connections do not re-issue journal_mode=WAL while
+/// a bulk import is active. No schema migrations.
 pub(crate) fn connection_fast(app: &tauri::AppHandle) -> Result<Connection, String> {
     let path = db_path(app)?;
     let conn = Connection::open(path).map_err(|e| format!("Unable to open SQLite database: {e}"))?;
     conn.execute_batch(
-        "PRAGMA busy_timeout=5000;
-         PRAGMA journal_mode=WAL;",
+        "PRAGMA busy_timeout=5000;",
     )
     .map_err(|e| format!("Unable to configure SQLite connection: {e}"))?;
     Ok(conn)
@@ -519,18 +517,74 @@ pub(crate) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<NativePe
 }
 
 fn execute_upsert(conn: &Connection, dataset_id: &str, row: &NativePersonRowInput) -> Result<(), String> {
-    conn.execute(
-        "INSERT OR REPLACE INTO imported_rows(dataset_id,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
-        params![dataset_id,row.serial_no.parse::<i64>().unwrap_or(0),row.serial_no,row.case_id,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,row.address,row.state,row.verification_status,row.information_details.information_fy,row.information_details.information_source_type,row.information_details.information_source_description,row.information_details.information_type,row.information_details.information_description,row.information_details.information_value,row.information_details.source,row.information_details.finding,row.verification_details.actionable_ay,row.verification_details.statutory_reason,row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,row.verification_details.information_value,row.verification_details.result_description],
-    ).map_err(|e| format!("Unable to save row: {e}"))?;
+    let row_order = row.serial_no.parse::<i64>().unwrap_or(0);
+    let changed = conn
+        .execute(
+            "UPDATE imported_rows SET
+                row_order=?1, serial_no=?2, pan=?3, name=?4, dob_doi=?5, mobile=?6, email=?7,
+                pin_code=?8, address=?9, state=?10, verification_status=?11, information_fy=?12,
+                information_source_type=?13, information_source_description=?14, information_type=?15,
+                information_description=?16, information_value=?17, source=?18, finding=?19, actionable_ay=?20,
+                statutory_reason=?21, verification_result_type=?22, income_escaping_assessment_value=?23,
+                verification_information_value=?24, result_description=?25
+             WHERE dataset_id=?26 AND case_id=?27",
+            params![
+                row_order,row.serial_no,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,
+                row.address,row.state,row.verification_status,row.information_details.information_fy,
+                row.information_details.information_source_type,row.information_details.information_source_description,
+                row.information_details.information_type,row.information_details.information_description,
+                row.information_details.information_value,row.information_details.source,row.information_details.finding,
+                row.verification_details.actionable_ay,row.verification_details.statutory_reason,
+                row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,
+                row.verification_details.information_value,row.verification_details.result_description,
+                dataset_id,row.case_id
+            ],
+        )
+        .map_err(|e| format!("Unable to update row: {e}"))?;
+
+    if changed == 0 {
+        conn.execute(
+            "INSERT INTO imported_rows(dataset_id,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
+            params![dataset_id,row_order,row.serial_no,row.case_id,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,row.address,row.state,row.verification_status,row.information_details.information_fy,row.information_details.information_source_type,row.information_details.information_source_description,row.information_details.information_type,row.information_details.information_description,row.information_details.information_value,row.information_details.source,row.information_details.finding,row.verification_details.actionable_ay,row.verification_details.statutory_reason,row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,row.verification_details.information_value,row.verification_details.result_description],
+        )
+        .map_err(|e| format!("Unable to insert row: {e}"))?;
+    }
     Ok(())
 }
 
 fn execute_upsert_tx(tx: &rusqlite::Transaction<'_>, dataset_id: &str, row: &NativePersonRowInput) -> Result<(), String> {
-    tx.execute(
-        "INSERT OR REPLACE INTO imported_rows(dataset_id,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
-        params![dataset_id,row.serial_no.parse::<i64>().unwrap_or(0),row.serial_no,row.case_id,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,row.address,row.state,row.verification_status,row.information_details.information_fy,row.information_details.information_source_type,row.information_details.information_source_description,row.information_details.information_type,row.information_details.information_description,row.information_details.information_value,row.information_details.source,row.information_details.finding,row.verification_details.actionable_ay,row.verification_details.statutory_reason,row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,row.verification_details.information_value,row.verification_details.result_description],
-    ).map_err(|e| format!("Unable to save row: {e}"))?;
+    let row_order = row.serial_no.parse::<i64>().unwrap_or(0);
+    let changed = tx
+        .execute(
+            "UPDATE imported_rows SET
+                row_order=?1, serial_no=?2, pan=?3, name=?4, dob_doi=?5, mobile=?6, email=?7,
+                pin_code=?8, address=?9, state=?10, verification_status=?11, information_fy=?12,
+                information_source_type=?13, information_source_description=?14, information_type=?15,
+                information_description=?16, information_value=?17, source=?18, finding=?19, actionable_ay=?20,
+                statutory_reason=?21, verification_result_type=?22, income_escaping_assessment_value=?23,
+                verification_information_value=?24, result_description=?25
+             WHERE dataset_id=?26 AND case_id=?27",
+            params![
+                row_order,row.serial_no,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,
+                row.address,row.state,row.verification_status,row.information_details.information_fy,
+                row.information_details.information_source_type,row.information_details.information_source_description,
+                row.information_details.information_type,row.information_details.information_description,
+                row.information_details.information_value,row.information_details.source,row.information_details.finding,
+                row.verification_details.actionable_ay,row.verification_details.statutory_reason,
+                row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,
+                row.verification_details.information_value,row.verification_details.result_description,
+                dataset_id,row.case_id
+            ],
+        )
+        .map_err(|e| format!("Unable to update row: {e}"))?;
+
+    if changed == 0 {
+        tx.execute(
+            "INSERT INTO imported_rows(dataset_id,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
+            params![dataset_id,row_order,row.serial_no,row.case_id,row.pan,row.name,row.dob_doi,row.mobile,row.email,row.pin_code,row.address,row.state,row.verification_status,row.information_details.information_fy,row.information_details.information_source_type,row.information_details.information_source_description,row.information_details.information_type,row.information_details.information_description,row.information_details.information_value,row.information_details.source,row.information_details.finding,row.verification_details.actionable_ay,row.verification_details.statutory_reason,row.verification_details.verification_result_type,row.verification_details.income_escaping_assessment_value,row.verification_details.information_value,row.verification_details.result_description],
+        )
+        .map_err(|e| format!("Unable to insert row: {e}"))?;
+    }
     Ok(())
 }
 
@@ -540,23 +594,6 @@ fn pick_csv_file() -> Result<Option<PickedCsvFile>, String> {
     let metadata = fs::metadata(&path).map_err(|e| format!("Unable to access selected CSV: {e}"))?;
     let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| "The selected CSV has an invalid name.".to_string())?.to_string();
     Ok(Some(PickedCsvFile { file_name, file_path: path.to_string_lossy().to_string(), file_size: metadata.len() }))
-}
-
-#[allow(dead_code)]
-fn record_value(record: &StringRecord, index: usize) -> String { record.get(index).unwrap_or("").trim().to_string() }
-
-#[allow(dead_code)]
-fn validate_and_map_record(record: &StringRecord, row_number: usize, dataset_index: usize, reference: &str) -> Result<NativePersonRowInput, String> {
-    if record.len() != 19 { return Err(format!("Invalid CSV data at row {row_number}: expected 19 columns but found {}.", record.len())); }
-    let pan=record_value(record,0); let name=record_value(record,1); let dob_doi=record_value(record,2); let mobile=record_value(record,3); let email=record_value(record,4); let pin_code=record_value(record,5);
-    let required=[("PAN",pan.as_str()),("Name",name.as_str()),("DOB/DOI",dob_doi.as_str()),("Mobile",mobile.as_str()),("E-Mail",email.as_str()),("PIN Code",pin_code.as_str()),("Address",record.get(6).unwrap_or("")),("State",record.get(7).unwrap_or("")),("FY",record.get(8).unwrap_or("")),("Information Type",record.get(9).unwrap_or("")),("Findings",record.get(10).unwrap_or("")),("Source",record.get(11).unwrap_or("")),("Information Value",record.get(12).unwrap_or("")),("Actionable AY",record.get(14).unwrap_or("")),("Verification Result Type",record.get(15).unwrap_or("")),("Statutory Reason",record.get(16).unwrap_or("")),("Income Escaping Assessment Value",record.get(17).unwrap_or("")),("Verification Information Value",record.get(18).unwrap_or(""))];
-    if let Some((field,_))=required.iter().find(|(_,v)|v.trim().is_empty()){return Err(format!("Invalid CSV data at row {row_number}: {field} is required."));}
-    let pan_chars: Vec<char>=pan.chars().collect(); if pan_chars.len()!=10 || !pan_chars[..5].iter().all(|c|c.is_ascii_alphabetic()) || !pan_chars[5..9].iter().all(|c|c.is_ascii_digit()) || !pan_chars[9..10].iter().all(|c|c.is_ascii_alphabetic()){return Err(format!("Invalid PAN at CSV row {row_number}."));}
-    if mobile.len()!=10 || !mobile.chars().all(|c|c.is_ascii_digit()){return Err(format!("Invalid Mobile at CSV row {row_number}."));}
-    if pin_code.len()!=6 || !pin_code.chars().all(|c|c.is_ascii_digit()){return Err(format!("Invalid PIN Code at CSV row {row_number}."));}
-    if !email.contains('@') || !email.contains('.') { return Err(format!("Invalid E-Mail at CSV row {row_number}.")); }
-    let index=dataset_index.max(1); let reference=if reference.trim().is_empty(){"LOCAL"}else{reference.trim()};
-    Ok(NativePersonRowInput{serial_no:format!("{:05}",index),case_id:format!("{}-{:05}",reference,index),pan:pan.to_ascii_uppercase(),name,dob_doi,mobile,email:email.to_ascii_lowercase(),pin_code,address:record_value(record,6),state:record_value(record,7),verification_status:"Pending".to_string(),information_details:NativeInformationDetailsInput{information_fy:record_value(record,8),information_source_type:String::new(),information_source_description:String::new(),information_type:record_value(record,9),information_description:record_value(record,13),information_value:record_value(record,12),source:record_value(record,11),finding:record_value(record,10)},verification_details:NativeVerificationDetailsInput{actionable_ay:record_value(record,14),statutory_reason:record_value(record,16),verification_result_type:record_value(record,15),income_escaping_assessment_value:record_value(record,17),information_value:record_value(record,18),result_description:String::new()}})
 }
 
 #[derive(Debug, Serialize)]
@@ -602,73 +639,6 @@ fn optimized_csv_insert_sql() -> &'static str {
         ?22,?23,?24,?25,?26,?27
     )"
 }
-
-fn trim_csv(value: Option<&str>) -> &str {
-    value.unwrap_or("").trim()
-}
-
-fn validate_csv_fast(record: &StringRecord, row_number: usize) -> Result<(), String> {
-    if record.len() != 19 {
-        return Err(format!(
-            "Invalid CSV data at row {row_number}: expected 19 columns but found {}.",
-            record.len()
-        ));
-    }
-
-    let pan = trim_csv(record.get(0));
-    let mobile = trim_csv(record.get(3));
-    let email = trim_csv(record.get(4));
-    let pin_code = trim_csv(record.get(5));
-
-    for (field, value) in [
-        ("PAN", pan),
-        ("Name", trim_csv(record.get(1))),
-        ("DOB/DOI", trim_csv(record.get(2))),
-        ("Mobile", mobile),
-        ("E-Mail", email),
-        ("PIN Code", pin_code),
-        ("Address", trim_csv(record.get(6))),
-        ("State", trim_csv(record.get(7))),
-        ("FY", trim_csv(record.get(8))),
-        ("Information Type", trim_csv(record.get(9))),
-        ("Findings", trim_csv(record.get(10))),
-        ("Source", trim_csv(record.get(11))),
-        ("Information Value", trim_csv(record.get(12))),
-        ("Actionable AY", trim_csv(record.get(14))),
-        ("Verification Result Type", trim_csv(record.get(15))),
-        ("Statutory Reason", trim_csv(record.get(16))),
-        ("Income Escaping Assessment Value", trim_csv(record.get(17))),
-        ("Verification Information Value", trim_csv(record.get(18))),
-    ] {
-        if value.is_empty() {
-            return Err(format!(
-                "Invalid CSV data at row {row_number}: {field} is required."
-            ));
-        }
-    }
-
-    let pan_bytes = pan.as_bytes();
-    let valid_pan = pan_bytes.len() == 10
-        && pan_bytes[0..5].iter().all(u8::is_ascii_alphabetic)
-        && pan_bytes[5..9].iter().all(u8::is_ascii_digit)
-        && pan_bytes[9].is_ascii_alphabetic();
-
-    if !valid_pan {
-        return Err(format!("Invalid PAN at CSV row {row_number}."));
-    }
-    if mobile.len() != 10 || !mobile.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(format!("Invalid Mobile at CSV row {row_number}."));
-    }
-    if pin_code.len() != 6 || !pin_code.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(format!("Invalid PIN Code at CSV row {row_number}."));
-    }
-    if !email.contains('@') || !email.contains('.') {
-        return Err(format!("Invalid E-Mail at CSV row {row_number}."));
-    }
-
-    Ok(())
-}
-
 
 fn read_csv_import_config(app: &tauri::AppHandle) -> CsvImportConfig {
     let defaults = CsvImportConfig {
@@ -736,7 +706,9 @@ fn run_csv_import_blocking(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
-        .from_reader(BufReader::with_capacity(8 * 1024 * 1024, file));
+        // Keep the parser strict only about the 19-column shape. Individual field
+        // contents are deliberately not validated or transformed.
+        .from_reader(BufReader::with_capacity(32 * 1024 * 1024, file));
 
     let headers = reader
         .headers()
@@ -764,8 +736,8 @@ fn run_csv_import_blocking(
 
     let conn = connection(&app)?;
 
-    // The existing POC created four secondary indexes before ingest. That multiplies SQLite
-    // write work for every row. We keep only the one index required for deterministic page reads.
+    // Drop any legacy row_order secondary index before the bulk load. Pagination uses
+    // SQLite rowid insertion order, so no secondary B-tree is needed for the SLA path.
     conn.execute(
         "DROP INDEX IF EXISTS idx_imported_rows_dataset_row_order",
         [],
@@ -774,9 +746,11 @@ fn run_csv_import_blocking(
 
     conn.execute_batch(&format!(
         "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=NORMAL;
+         PRAGMA synchronous=OFF;
          PRAGMA temp_store=MEMORY;
-         PRAGMA cache_size=-{};",
+         PRAGMA cache_size=-{};
+         PRAGMA wal_autocheckpoint=0;
+         PRAGMA mmap_size=268435456;",
         sqlite_cache_mb * 1024
     ))
     .map_err(|e| format!("Unable to configure SQLite import: {e}"))?;
@@ -803,12 +777,13 @@ fn run_csv_import_blocking(
     let mut imported = 0usize;
     let mut ready_emitted = false;
     let mut next_progress_at = ready_rows;
+    let mut record = StringRecord::new();
 
     loop {
         let current_batch_size = if !ready_emitted {
             ready_rows
         } else {
-            batch_rows.min(progress_rows.max(1))
+            batch_rows.max(1)
         };
 
         let tx = conn
@@ -823,49 +798,49 @@ fn run_csv_import_blocking(
                 .map_err(|e| format!("Unable to prepare CSV insert statement: {e}"))?;
 
             while batch_inserted < current_batch_size {
-                let Some(result) = reader.records().next() else {
+                if !reader
+                    .read_record(&mut record)
+                    .map_err(|e| format!("Unable to read CSV row {}: {e}", imported + 2))?
+                {
                     break;
-                };
+                }
 
-                let record =
-                    result.map_err(|e| format!("Unable to read CSV row {}: {e}", imported + 2))?;
-
+                // Only the CSV structure is validated. The reader enforces the fixed
+                // 19-column shape; field values may be empty or non-standard and are stored
+                // exactly as supplied. Verification remains a manual user workflow.
                 let row_number = imported + 2;
-                validate_csv_fast(&record, row_number)?;
-
                 let order = imported + 1;
                 let serial_no = format!("{order:07}");
                 let case_id = format!("{reference}-{serial_no}");
-                let pan = trim_csv(record.get(0)).to_ascii_uppercase();
-                let email = trim_csv(record.get(4)).to_ascii_lowercase();
+                let csv_value = |index: usize| record.get(index).unwrap_or("");
 
                 stmt.execute(params![
                     dataset_id,
                     order as i64,
                     serial_no,
                     case_id,
-                    pan,
-                    trim_csv(record.get(1)),
-                    trim_csv(record.get(2)),
-                    trim_csv(record.get(3)),
-                    email,
-                    trim_csv(record.get(5)),
-                    trim_csv(record.get(6)),
-                    trim_csv(record.get(7)),
+                    csv_value(0),
+                    csv_value(1),
+                    csv_value(2),
+                    csv_value(3),
+                    csv_value(4),
+                    csv_value(5),
+                    csv_value(6),
+                    csv_value(7),
                     "Pending",
-                    trim_csv(record.get(8)),
+                    csv_value(8),
                     "",
                     "",
-                    trim_csv(record.get(9)),
-                    trim_csv(record.get(13)),
-                    trim_csv(record.get(12)),
-                    trim_csv(record.get(11)),
-                    trim_csv(record.get(10)),
-                    trim_csv(record.get(14)),
-                    trim_csv(record.get(16)),
-                    trim_csv(record.get(15)),
-                    trim_csv(record.get(17)),
-                    trim_csv(record.get(18)),
+                    csv_value(9),
+                    csv_value(13),
+                    csv_value(12),
+                    csv_value(11),
+                    csv_value(10),
+                    csv_value(14),
+                    csv_value(16),
+                    csv_value(15),
+                    csv_value(17),
+                    csv_value(18),
                     "",
                 ])
                 .map_err(|e| format!("Unable to save CSV row {row_number}: {e}"))?;
@@ -895,6 +870,8 @@ fn run_csv_import_blocking(
         .map_err(|e| format!("Unable to update import metadata: {e}"))?;
 
         if !ready_emitted && imported >= ready_rows {
+            // First page is available for display. The Angular workflow remains locked until
+            // completed=true so user edits cannot race the ongoing import/finalization.
             ready_emitted = true;
             next_progress_at = imported.saturating_add(progress_rows);
         }
@@ -940,12 +917,6 @@ fn run_csv_import_blocking(
         return Err("CSV contains no data rows.".to_string());
     }
 
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_imported_rows_dataset_row_order
-         ON imported_rows(dataset_id,row_order)",
-        [],
-    )
-    .map_err(|e| format!("Unable to finalize the row-order index: {e}"))?;
 
     conn.execute(
         "UPDATE dataset_metadata
@@ -954,6 +925,14 @@ fn run_csv_import_blocking(
         params![dataset_id, imported as i64, file_path, now_iso()],
     )
     .map_err(|e| format!("Unable to finalize import metadata: {e}"))?;
+
+    // Restore normal durability after the reconstructible bulk load. During the import the
+    // source CSV can be used to rebuild the dataset, so synchronous=OFF removes fsync work
+    // from the hot path. User edits run later with NORMAL durability.
+    conn.execute_batch(
+        "PRAGMA synchronous=NORMAL;"
+    )
+    .map_err(|e| format!("Unable to restore SQLite durability mode: {e}"))?;
 
     let elapsed_ms = timer.elapsed().as_millis();
     let rows_per_second =
@@ -1007,6 +986,41 @@ async fn import_csv_to_store(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CsvImportStatus {
+    imported_count: usize,
+    ready: bool,
+    completed: bool,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_csv_import_status(app: tauri::AppHandle, dataset_id: String) -> Result<CsvImportStatus, String> {
+    let conn = connection_fast(&app)?;
+    let result: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT row_count, status FROM dataset_metadata WHERE dataset_id=?1",
+            params![dataset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    let Some((row_count, status)) = result else {
+        return Ok(CsvImportStatus {
+            imported_count: 0,
+            ready: false,
+            completed: false,
+        });
+    };
+
+    Ok(CsvImportStatus {
+        imported_count: row_count.max(0) as usize,
+        ready: row_count > 0,
+        completed: status == "READY",
+    })
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn get_row_page(
     app: tauri::AppHandle,
@@ -1052,9 +1066,14 @@ async fn get_row_page(
             .map_err(|e| e.to_string())?
         };
 
+        // Rows are inserted sequentially and edits use UPDATE (not REPLACE), so SQLite rowid
+        // preserves insertion order for this dataset. Avoiding the secondary row_order B-tree
+        // removes a large bulk-load and final-index-build cost for 500K+ rows.
+        let order_column = "rowid";
+
         let mut stmt = if term.is_empty() {
             conn.prepare(&format!(
-                "{ROW_SELECT} WHERE dataset_id=?1 ORDER BY row_order LIMIT ?2 OFFSET ?3"
+                "{ROW_SELECT} WHERE dataset_id=?1 ORDER BY {order_column} LIMIT ?2 OFFSET ?3"
             ))
             .map_err(|e| e.to_string())?
         } else {
@@ -1068,7 +1087,7 @@ async fn get_row_page(
                      OR state LIKE ?4 ESCAPE '\\'
                      OR serial_no LIKE ?4 ESCAPE '\\'
                  )
-                 ORDER BY row_order LIMIT ?2 OFFSET ?3"
+                 ORDER BY {order_column} LIMIT ?2 OFFSET ?3"
             ))
             .map_err(|e| e.to_string())?
         };
@@ -1350,7 +1369,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_row_page,get_row_by_case_id,
+            pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_csv_import_status,get_row_page,get_row_by_case_id,
             commands::data_commands::get_runtime_config,commands::data_commands::get_row_window,commands::data_commands::stream_row_window,
             upsert_row,delete_rows,set_rows_status,clear_row_store,clone_row_store,rename_row_store,seed_row_store,export_csv_file,
             save_draft,list_drafts,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website

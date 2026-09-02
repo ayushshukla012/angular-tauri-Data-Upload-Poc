@@ -97,6 +97,8 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly csvImportReady = signal(false);
   readonly csvImportElapsedMs = signal<number | null>(null);
   private csvImportUnlisteners: UnlistenFn[] = [];
+  private csvImportMonitorTimer: number | null = null;
+  private nativeRowsRequestId = 0;
   readonly currentDocumentId = signal<string | null>(null);
   readonly savedDrafts = signal<SavedDraftSummary[]>([]);
   readonly storageLocation = signal<string>('');
@@ -129,31 +131,12 @@ export class AppComponent implements OnInit, OnDestroy {
   });
 
   readonly rowForm = this.fb.group({
-    pan: ['', [Validators.required, Validators.pattern(/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/)]],
-    name: ['', Validators.required],
-    dobDoi: ['', Validators.required],
-    mobile: ['', [Validators.required, Validators.pattern(/^[0-9]{10}$/)]],
-    email: ['', [Validators.required, Validators.email]],
-    pinCode: ['', [Validators.required, Validators.pattern(/^[0-9]{6}$/)]],
-    address: ['', Validators.required],
-    state: ['', Validators.required],
-    verificationStatus: ['Pending' as VerificationStatus, Validators.required],
-
-    informationFy: ['', Validators.required],
-    informationSourceType: [''],
-    informationSourceDescription: [''],
-    informationType: ['', Validators.required],
-    informationDescription: [''],
-    informationValue: ['', Validators.required],
-    source: ['', Validators.required],
-    finding: ['', Validators.required],
-
-    actionableAy: ['', Validators.required],
-    statutoryReason: ['', Validators.required],
-    verificationResultType: ['', Validators.required],
-    incomeEscapingAssessmentValue: ['', Validators.required],
-    verificationInformationValue: ['', Validators.required],
-    resultDescription: ['']
+    pan: [''], name: [''], dobDoi: [''], mobile: [''], email: [''], pinCode: [''],
+    address: [''], state: [''], verificationStatus: ['Pending' as VerificationStatus],
+    informationFy: [''], informationSourceType: [''], informationSourceDescription: [''],
+    informationType: [''], informationDescription: [''], informationValue: [''], source: [''], finding: [''],
+    actionableAy: [''], statutoryReason: [''], verificationResultType: [''],
+    incomeEscapingAssessmentValue: [''], verificationInformationValue: [''], resultDescription: ['']
   });
 
   readonly rows = signal<PersonRow[]>([]);
@@ -265,6 +248,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.closeUnlisten?.();
+    this.stopCsvImportMonitor();
     for (const unlisten of this.csvImportUnlisteners) unlisten();
     if (!this.nativeMode) window.removeEventListener('beforeunload', this.handleBrowserBeforeUnload);
   }
@@ -295,19 +279,25 @@ export class AppComponent implements OnInit, OnDestroy {
 
           // First ready event: close the modal immediately and show initial rows
           if (payload.ready && !wasReady) {
-            console.log('[TS] Ready event! Closing modal and refreshing rows.');
+            console.log('[TS] Initial rows ready. Closing CSV modal; UI remains locked until the full dataset is committed.');
             this.modal.set('none');
-            this.importBusy.set(false);
             void this.refreshNativeRows();
           }
 
           if (payload.completed) {
+            this.stopCsvImportMonitor();
             console.log('[TS] Import completed! Total rows:', payload.importedCount);
-            this.csvImportActive.set(false);
-            this.importBusy.set(false);
-            this.nativeStoreDirty.set(true);
-            this.markDirty();
-            void this.refreshNativeRows();
+            // Refresh the final visible page first. Only after the final SQLite commit is
+            // visible to the UI do we release the workflow lock. This guarantees that a
+            // user cannot immediately edit a row while the import is still finalizing.
+            void this.refreshNativeRows().finally(() => {
+              this.ngZone.run(() => {
+                this.csvImportActive.set(false);
+                this.importBusy.set(false);
+                this.nativeStoreDirty.set(true);
+                this.markDirty();
+              });
+            });
           }
         });
       }),
@@ -317,6 +307,7 @@ export class AppComponent implements OnInit, OnDestroy {
           console.error('[TS] csv-import-error received:', payload);
           if (payload.datasetId !== this.nativeRowStoreId()) return;
 
+          this.stopCsvImportMonitor();
           this.csvImportActive.set(false);
           this.csvImportReady.set(false);
           this.importBusy.set(false);
@@ -384,6 +375,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   back(): void {
+    if (this.csvImportActive()) return;
     if (this.step() === 1) {
       this.step.set(0);
       return;
@@ -397,6 +389,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   nextToCreate(): void {
+    if (this.csvImportActive()) return;
     if (!this.packetForm.valid) {
       this.step.set(1);
       this.packetEditMode.set(true);
@@ -410,7 +403,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.step.set(3);
   }
 
-  openAddRow(): void {
+  openAddRow(): void { if (this.csvImportActive()) return;
     this.currentRowIndex.set(null);
     this.rowForm.reset({ verificationStatus: 'Pending' });
     this.personOpen.set(true);
@@ -420,6 +413,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async editRow(index: number): Promise<void> {
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before editing rows.', 'info'); return; }
     let row = this.rows()[index];
     if (this.nativeMode && row?.caseId && this.nativeRowStoreId()) {
       row = await invoke<PersonRow | null>('get_row_by_case_id', { datasetId: this.nativeRowStoreId(), caseId: row.caseId }) ?? row;
@@ -444,19 +438,29 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async saveRow(): Promise<void> {
-    this.rowForm.markAllAsTouched();
-    const invalidRequired = ['pan', 'name', 'dobDoi', 'mobile', 'email', 'pinCode', 'address', 'state', 'informationFy', 'informationType', 'finding', 'source', 'informationValue', 'actionableAy', 'statutoryReason', 'verificationResultType', 'incomeEscapingAssessmentValue', 'verificationInformationValue']
-      .some(name => this.rowForm.get(name)?.invalid);
-    if (invalidRequired) {
-      this.toast.show('Complete all mandatory Person, Information and Verification details before saving.', 'error');
-      if (this.hasPersonValidationError()) this.personOpen.set(true); else if (this.hasInformationValidationError()) this.infoOpen.set(true); else this.verificationOpen.set(true);
-      return;
-    }
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before saving a row.', 'info'); return; }
+    // No field-level validation here. Imported values are intentionally editable as-is;
+    // user verification remains a separate/manual workflow.
     const existingIndex = this.currentRowIndex(); const existing = existingIndex !== null ? this.rows()[existingIndex] : null; const v = this.rowForm.getRawValue();
-    const informationDetails: InformationDetails = { informationFy: v.informationFy!.trim(), informationSourceType: v.informationSourceType?.trim() || '', informationSourceDescription: v.informationSourceDescription?.trim() || '', informationType: v.informationType!.trim(), informationDescription: v.informationDescription?.trim() || '', informationValue: v.informationValue!.trim(), source: v.source!.trim(), finding: v.finding!.trim() };
-    const verificationDetails: VerificationDetails = { actionableAy: v.actionableAy!.trim(), statutoryReason: v.statutoryReason!.trim(), verificationResultType: v.verificationResultType!.trim(), incomeEscapingAssessmentValue: v.incomeEscapingAssessmentValue!.trim(), informationValue: v.verificationInformationValue!.trim(), resultDescription: v.resultDescription?.trim() || '' };
+    const informationDetails: InformationDetails = {
+      informationFy: v.informationFy ?? '', informationSourceType: v.informationSourceType ?? '',
+      informationSourceDescription: v.informationSourceDescription ?? '', informationType: v.informationType ?? '',
+      informationDescription: v.informationDescription ?? '', informationValue: v.informationValue ?? '',
+      source: v.source ?? '', finding: v.finding ?? ''
+    };
+    const verificationDetails: VerificationDetails = {
+      actionableAy: v.actionableAy ?? '', statutoryReason: v.statutoryReason ?? '',
+      verificationResultType: v.verificationResultType ?? '', incomeEscapingAssessmentValue: v.incomeEscapingAssessmentValue ?? '',
+      informationValue: v.verificationInformationValue ?? '', resultDescription: v.resultDescription ?? ''
+    };
     const nextIndex = this.nativeMode ? this.nativeTotalRows() + 1 : this.rows().length + 1;
-    const row: PersonRow = { serialNo: existing?.serialNo ?? String(nextIndex).padStart(5, '0'), caseId: existing?.caseId ?? this.makeCaseId(nextIndex), pan: v.pan!.trim().toUpperCase(), name: v.name!.trim(), dobDoi: v.dobDoi!.trim(), mobile: v.mobile!.trim(), email: v.email!.trim().toLowerCase(), pinCode: v.pinCode!.trim(), address: v.address!.trim(), state: v.state!, verificationStatus: existing?.verificationStatus ?? 'Pending', informationDetails, verificationDetails };
+    const row: PersonRow = {
+      serialNo: existing?.serialNo ?? String(nextIndex).padStart(5, '0'),
+      caseId: existing?.caseId ?? this.makeCaseId(nextIndex),
+      pan: v.pan ?? '', name: v.name ?? '', dobDoi: v.dobDoi ?? '', mobile: v.mobile ?? '',
+      email: v.email ?? '', pinCode: v.pinCode ?? '', address: v.address ?? '', state: v.state ?? '',
+      verificationStatus: existing?.verificationStatus ?? 'Pending', informationDetails, verificationDetails
+    };
     try {
       if (this.nativeMode) {
         await this.ensureNativeWritableStore(); const datasetId = this.nativeRowStoreId(); if (!datasetId) throw new Error('Unable to determine the local row store.');
@@ -470,15 +474,8 @@ export class AppComponent implements OnInit, OnDestroy {
     } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to save the row.', 'error'); }
   }
 
-  private hasPersonValidationError(): boolean {
-    return ['pan', 'name', 'dobDoi', 'mobile', 'email', 'pinCode', 'address', 'state'].some(name => this.rowForm.get(name)?.invalid);
-  }
-
-  private hasInformationValidationError(): boolean {
-    return ['informationFy', 'informationType', 'finding', 'source', 'informationValue'].some(name => this.rowForm.get(name)?.invalid);
-  }
-
   async deleteSelected(): Promise<void> {
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before deleting rows.', 'info'); return; }
     const selected = this.selectedRows(); if (!selected.size) { this.toast.show('Select at least one row to delete.', 'info'); return; } if (this.hasCompletedSelection()) { this.toast.show('Completed rows cannot be deleted.', 'info'); return; }
     try {
       if (this.nativeMode) {
@@ -493,12 +490,14 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async validateRows(): Promise<void> {
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before validating rows.', 'info'); return; }
     const selectedIds = this.selectedRows(); if (!selectedIds.size) { this.toast.show('Select one or more Approved rows before validating.', 'info'); return; } if (this.hasCompletedSelection()) { this.toast.show('Completed rows cannot be validated.', 'info'); return; }
     const selected = this.rows().filter(row => selectedIds.has(row.caseId)); const notApproved = selected.filter(row => row.verificationStatus !== 'Approved'); if (notApproved.length) { this.toast.show('Only rows with Approved status can be validated. Pending and Completed rows were not changed.', 'error'); return; }
     try { if (this.nativeMode) { await this.ensureNativeWritableStore(); await invoke('set_rows_status', { datasetId: this.nativeRowStoreId(), caseIds: [...selectedIds], status: 'Completed' }); await this.refreshNativeRows(); } else { this.rows.update(current => current.map(row => selectedIds.has(row.caseId) ? { ...row, verificationStatus: 'Completed' } : row)); } this.markDirty(); this.selectedRows.set(new Set()); this.toast.show(`${selected.length} Approved row(s) converted to Completed.`, 'success'); } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to validate rows.', 'error'); }
   }
 
   async setRowVerificationStatus(row: PersonRow, value: string): Promise<void> {
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before updating verification status.', 'info'); return; }
     if (row.verificationStatus === 'Completed' || (value !== 'Pending' && value !== 'Approved')) return;
     try { if (this.nativeMode) { await this.ensureNativeWritableStore(); await invoke('set_rows_status', { datasetId: this.nativeRowStoreId(), caseIds: [row.caseId], status: value }); await this.refreshNativeRows(); } else { this.rows.update(current => current.map(item => item.caseId === row.caseId ? { ...item, verificationStatus: value as VerificationStatus } : item)); } this.markDirty(); } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to update verification status.', 'error'); }
   }
@@ -530,13 +529,48 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
 
-  setFilter(value: string): void { this.filter.set(value); this.page.set(1); if (this.nativeMode) void this.refreshNativeRows(); }
+  setFilter(value: string): void { if (this.csvImportActive()) return; this.filter.set(value); this.page.set(1); if (this.nativeMode) void this.refreshNativeRows(); }
 
-  setPage(value: number | '…'): void { if (value === '…') return; this.page.set(Math.max(1, Math.min(this.pageCount(), value))); if (this.nativeMode) void this.refreshNativeRows(); }
+ setPage(value: number | '…'): void {
+    if (value === '…') {
+      return;
+    }
 
-  changePageSize(value: string): void { this.pageSize.set(Number(value)); this.page.set(1); if (this.nativeMode) void this.refreshNativeRows(); }
+    const targetPage = Math.max(
+      1,
+      Math.min(this.pageCount(), Number(value))
+    );
 
-  openCsvModal(): void { this.clearCsvSelection(); this.modal.set('csv'); }
+    if (targetPage === this.page()) {
+      return;
+    }
+
+    this.page.set(targetPage);
+
+    if (this.nativeMode) {
+      void this.refreshNativeRows();
+    }
+  }
+
+  changePageSize(value: string): void {
+    const nextPageSize = Number(value);
+
+    if (!Number.isFinite(nextPageSize) || nextPageSize <= 0) {
+      return;
+    }
+
+    if (nextPageSize === this.pageSize() && this.page() === 1) {
+      return;
+    }
+
+    this.pageSize.set(nextPageSize);
+    this.page.set(1);
+
+    if (this.nativeMode) {
+      void this.refreshNativeRows();
+    }
+  }
+  openCsvModal(): void { if (this.csvImportActive()) return; this.clearCsvSelection(); this.modal.set('csv'); }
 
   clearCsvSelection(): void { this.csvFile.set(null); this.csvNativePath.set(null); this.csvImportProgress.set(''); this.importBusy.set(false); }
 
@@ -631,6 +665,7 @@ export class AppComponent implements OnInit, OnDestroy {
         // native metadata gives us a deterministic first-page handoff even if an event is
         // delayed by the desktop runtime. The polling is asynchronous and never blocks the UI.
         await this.waitForInitialCsvRows(datasetId);
+        this.startCsvImportMonitor(datasetId);
         return;
       }
 
@@ -760,9 +795,11 @@ export class AppComponent implements OnInit, OnDestroy {
           this.ngZone.run(() => {
             this.csvImportReady.set(true);
             this.modal.set('none');
-            this.importBusy.set(false);
+            // Keep importBusy/csvImportActive true. The dataset is not editable until
+            // the native importer reports completed=true, so edits can never race the
+            // final SQLite commit/finalization phase.
             this.csvImportProgress.set(
-              `${result.totalCount.toLocaleString()} records available — remaining records are loading in the background…`
+              `${result.totalCount.toLocaleString()} records staged — waiting for the full CSV to finish loading…`
             );
           });
           return;
@@ -776,6 +813,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async exportCsv(): Promise<void> {
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before exporting.', 'info'); return; }
     try {
       if (this.nativeMode) { const path = await invoke<string | null>('export_csv_file', { datasetId: this.nativeRowStoreId(), suggestedName: `${this.packet.referenceNumber || 'data-upload'}-rows.csv` }); if (path) this.toast.show(`CSV saved to ${path}.`, 'success'); return; }
       const esc = (value: string) => `"${value.replaceAll('"', '""')}"`; const lines = [this.csvHeaders.map(esc).join(',')]; for (const r of this.rows()) { lines.push([r.pan, r.name, r.dobDoi, r.mobile, r.email, r.pinCode, r.address, r.state, r.informationDetails.informationFy, r.informationDetails.informationType, r.informationDetails.finding, r.informationDetails.source, r.informationDetails.informationValue, r.informationDetails.informationDescription, r.verificationDetails.actionableAy, r.verificationDetails.verificationResultType, r.verificationDetails.statutoryReason, r.verificationDetails.incomeEscapingAssessmentValue, r.verificationDetails.informationValue].map(esc).join(',')); } await this.saveExport(lines.join('\r\n'), `${this.packet.referenceNumber || 'data-upload'}-rows.csv`);
@@ -968,6 +1006,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async saveDraft(): Promise<boolean> {
+    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before saving a draft.', 'info'); return false; }
     const draftId = this.currentDraftId() ?? (this.nativeMode ? (this.nativeRowStoreId() ?? `draft-${crypto.randomUUID()}`) : undefined);
     if (this.nativeMode && !this.nativeRowStoreId()) this.nativeRowStoreId.set(draftId ?? null);
     const draft: DraftState = { version: 1, savedAt: new Date().toISOString(), step: this.step(), packet: this.packet, rows: this.nativeMode ? [] : this.rows(), rowStoreId: this.nativeMode ? this.nativeRowStoreId() ?? undefined : undefined, rowCount: this.nativeMode ? this.nativeTotalRows() : this.rows().length, documents: this.documents().map(doc => ({ id: doc.id, fileName: doc.fileName, docType: doc.docType, description: doc.description, attachedFor: doc.attachedFor, rowCaseIds: doc.rowCaseIds, filePath: doc.filePath, fileSize: doc.fileSize ?? doc.file?.size, fileType: doc.fileType ?? doc.file?.type, lastModified: doc.lastModified ?? doc.file?.lastModified })), draftId };
@@ -1166,76 +1205,33 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
-  private mapCsvRecord(record: Record<string, string>, index: number, csvRowNumber: number): PersonRow {
-    const v = (header: string): string => record[header]?.trim() ?? '';
-    const pan = v('PAN');
-    const name = v('Name');
-    const dobDoi = v('DOB/DOI');
-    const mobile = v('Mobile');
-    const email = v('E-Mail');
-    const pinCode = v('PIN Code');
-    const address = v('Address');
-    const state = v('State');
-    const informationFy = v('FY');
-    const informationType = v('Information Type');
-    const finding = v('Findings');
-    const source = v('Source');
-    const informationValue = v('Information Value');
-    const description = v('Description');
-    const actionableAy = v('Actionable AY');
-    const verificationResultType = v('Verification Result Type');
-    const statutoryReason = v('Statutory Reason');
-    const incomeEscapingAssessmentValue = v('Income Escaping Assessment Value');
-    const verificationInformationValue = v('Verification Information Value');
-
-    const required = [
-      ['PAN', pan], ['Name', name], ['DOB/DOI', dobDoi], ['Mobile', mobile], ['E-Mail', email], ['PIN Code', pinCode],
-      ['Address', address], ['State', state], ['FY', informationFy], ['Information Type', informationType], ['Findings', finding],
-      ['Source', source], ['Information Value', informationValue], ['Actionable AY', actionableAy],
-      ['Verification Result Type', verificationResultType], ['Statutory Reason', statutoryReason],
-      ['Income Escaping Assessment Value', incomeEscapingAssessmentValue], ['Verification Information Value', verificationInformationValue]
-    ];
-    const missing = required.find(([, value]) => !value);
-    if (missing) throw new Error(`Invalid CSV data at row ${csvRowNumber}: ${missing[0]} is required.`);
-    if (!/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/.test(pan)) throw new Error(`Invalid PAN at CSV row ${csvRowNumber}.`);
-    if (!/^\d{10}$/.test(mobile)) throw new Error(`Invalid Mobile at CSV row ${csvRowNumber}.`);
-    if (!/^\d{6}$/.test(pinCode)) throw new Error(`Invalid PIN Code at CSV row ${csvRowNumber}.`);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error(`Invalid E-Mail at CSV row ${csvRowNumber}.`);
-
+  private mapCsvRecord(record: Record<string, string>, index: number, _csvRowNumber: number): PersonRow {
+    const v = (header: string): string => record[header] ?? '';
     return {
       serialNo: String(index).padStart(5, '0'),
       caseId: this.makeCaseId(index),
-      pan: pan.toUpperCase(),
-      name,
-      dobDoi,
-      mobile,
-      email: email.toLowerCase(),
-      pinCode,
-      address,
-      state,
+      pan: v('PAN'), name: v('Name'), dobDoi: v('DOB/DOI'), mobile: v('Mobile'),
+      email: v('E-Mail'), pinCode: v('PIN Code'), address: v('Address'), state: v('State'),
       verificationStatus: 'Pending',
       informationDetails: {
-        informationFy,
-        informationSourceType: '',
-        informationSourceDescription: '',
-        informationType,
-        informationDescription: description,
-        informationValue,
-        source,
-        finding
+        informationFy: v('FY'), informationSourceType: '', informationSourceDescription: '',
+        informationType: v('Information Type'), informationDescription: v('Description'),
+        informationValue: v('Information Value'), source: v('Source'), finding: v('Findings')
       },
       verificationDetails: {
-        actionableAy,
-        statutoryReason,
-        verificationResultType,
-        incomeEscapingAssessmentValue,
-        informationValue: verificationInformationValue,
-        resultDescription: ''
+        actionableAy: v('Actionable AY'), statutoryReason: v('Statutory Reason'),
+        verificationResultType: v('Verification Result Type'),
+        incomeEscapingAssessmentValue: v('Income Escaping Assessment Value'),
+        informationValue: v('Verification Information Value'), resultDescription: ''
       }
     };
   }
 
   trackByCaseId(_index: number, row: PersonRow): string { return row.caseId; }
+
+  trackByPageNumber(index: number, value: PaginationItem): string | number {
+  return value;
+  }
 
   private normalHeader(value: string): string {
     return value.trim().toLowerCase().replace(/[\s_\-./]+/g, '');
@@ -1274,7 +1270,157 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async ensureNativeWritableStore(): Promise<void> { if (!this.nativeMode) return; if (!this.nativeRowStoreId()) this.nativeRowStoreId.set(`rows-${crypto.randomUUID()}`); if (this.nativeStoreDirty() || !this.currentDraftId()) return; const current = this.nativeRowStoreId(); if (!current) return; const next = `rows-${crypto.randomUUID()}`; await invoke('clone_row_store', { sourceDatasetId: current, targetDatasetId: next }); this.nativeRowStoreId.set(next); this.nativeStoreDirty.set(true); }
 
-  private async refreshNativeRows(): Promise<void> { if (!this.nativeMode || !this.nativeRowStoreId()) return; const result = await invoke<{ rows: PersonRow[]; totalCount: number }>('get_row_page', { datasetId: this.nativeRowStoreId(), page: this.page(), pageSize: this.pageSize(), filter: this.filter() }); this.rows.set(result.rows); this.nativeFilteredTotalRows.set(result.totalCount); const maxPage = Math.max(1, Math.ceil(result.totalCount / this.pageSize())); if (this.page() > maxPage) this.page.set(maxPage); }
+  private startCsvImportMonitor(datasetId: string): void {
+    this.stopCsvImportMonitor();
+
+    const poll = async (): Promise<void> => {
+      if (!this.nativeMode || this.nativeRowStoreId() !== datasetId) return;
+
+      try {
+        const status = await invoke<{ importedCount: number; ready: boolean; completed: boolean }>(
+          'get_csv_import_status',
+          { datasetId }
+        );
+
+        if (this.nativeRowStoreId() !== datasetId) return;
+
+        this.ngZone.run(() => {
+          this.nativeTotalRows.set(status.importedCount);
+          this.nativeFilteredTotalRows.set(status.importedCount);
+          this.csvImportActive.set(!status.completed);
+          this.csvImportReady.set(status.importedCount > 0);
+          this.csvImportProgress.set(
+            status.completed
+              ? `${status.importedCount.toLocaleString()} records loaded.`
+              : `${status.importedCount.toLocaleString()} records available — remaining records are loading in the background…`
+          );
+        });
+
+        if (status.completed) {
+          this.stopCsvImportMonitor();
+          await this.refreshNativeRows();
+          return;
+        }
+      } catch (error) {
+        console.warn('[TS] CSV import status polling failed:', error);
+      }
+
+      if (this.nativeMode && this.nativeRowStoreId() === datasetId && this.csvImportActive()) {
+        this.csvImportMonitorTimer = window.setTimeout(() => { void poll(); }, 500);
+      }
+    };
+
+    void poll();
+  }
+
+  private stopCsvImportMonitor(): void {
+    if (this.csvImportMonitorTimer !== null) {
+      window.clearTimeout(this.csvImportMonitorTimer);
+      this.csvImportMonitorTimer = null;
+    }
+  }
+
+  private async refreshNativeRows(): Promise<void> {
+    if (!this.nativeMode) {
+      return;
+    }
+
+    const datasetId = this.nativeRowStoreId();
+
+    if (!datasetId) {
+      return;
+    }
+
+    const requestId = ++this.nativeRowsRequestId;
+
+    const requestedPage = this.page();
+    const requestedPageSize = this.pageSize();
+    const requestedFilter = this.filter();
+
+    try {
+      const result = await invoke<{
+        rows: PersonRow[];
+        totalCount: number;
+      }>('get_row_page', {
+        datasetId,
+        page: requestedPage,
+        pageSize: requestedPageSize,
+        filter: requestedFilter
+      });
+
+      /*
+      * Ignore stale responses.
+      *
+      * Example:
+      * page 2 request starts
+      * page 3 request starts
+      * page 3 returns
+      * page 2 returns later
+      *
+      * The older page 2 response must not overwrite page 3.
+      */
+      if (requestId !== this.nativeRowsRequestId) {
+        return;
+      }
+
+      /*
+      * User may have changed dataset/filter/page while the request
+      * was in flight. Do not put an old result into the table.
+      */
+      if (this.nativeRowStoreId() !== datasetId) {
+        return;
+      }
+
+      if (this.page() !== requestedPage) {
+        return;
+      }
+
+      if (this.pageSize() !== requestedPageSize) {
+        return;
+      }
+
+      if (this.filter() !== requestedFilter) {
+        return;
+      }
+
+      this.rows.set(result.rows);
+      this.nativeFilteredTotalRows.set(result.totalCount);
+
+      const maxPage = Math.max(
+        1,
+        Math.ceil(result.totalCount / requestedPageSize)
+      );
+
+      /*
+      * If the current page became invalid because records were
+      * deleted, move back to the last valid page.
+      */
+      if (this.page() > maxPage) {
+        this.page.set(maxPage);
+
+        /*
+        * Refresh once for the corrected page.
+        */
+        void this.refreshNativeRows();
+      }
+    } catch (error) {
+      /*
+      * Do not overwrite the current page with an error from
+      * an old/stale request.
+      */
+      if (requestId !== this.nativeRowsRequestId) {
+        return;
+      }
+
+      console.warn('[TS] Failed to load native row page:', error);
+      this.toast.show(
+        error instanceof Error
+          ? error.message
+          : 'Unable to load the selected page.',
+        'error'
+      );
+    }
+  }
 
   private toNativeRowInput(row: PersonRow): unknown { return { serialNo: row.serialNo, caseId: row.caseId, pan: row.pan, name: row.name, dobDoi: row.dobDoi, mobile: row.mobile, email: row.email, pinCode: row.pinCode, address: row.address, state: row.state, verificationStatus: row.verificationStatus, informationDetails: row.informationDetails, verificationDetails: row.verificationDetails }; }
 

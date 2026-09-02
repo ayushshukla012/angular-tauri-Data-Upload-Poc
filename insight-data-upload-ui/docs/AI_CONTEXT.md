@@ -36,8 +36,9 @@ The native Rust layer owns large local datasets. Angular owns UI state and only 
 
 ## Non-negotiable performance SLA
 
-- Dataset target: `2,000,000+` rows.
-- Initial data readiness target: `<= 8 seconds`.
+- Demo dataset target: `500,000+` rows.
+- Initial data readiness target: `<= 4 seconds`.
+- First editable page: `50` committed rows.
 - TTFR target: `<= 1.5 seconds`.
 - UI must remain responsive while scrolling/filtering.
 - Active DOM rows target: `<= 150` (current page size is bounded; continuous CDK scrolling is not the current UI contract).

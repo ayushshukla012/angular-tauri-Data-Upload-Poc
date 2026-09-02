@@ -18,7 +18,7 @@
     </button>
     <div class="header-links">
       <button type="button" [disabled]="csvImportActive()" (click)="openExisting()">Open <span class="plus">＋</span></button>
-      <button type="button" [disabled]="csvImportActive()" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">Help ⓘ</button>
+      <button type="button" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">Help ⓘ</button>
     </div>
   </header>
 
@@ -93,7 +93,7 @@
 
         <div class="footer-actions">
           <button class="link-button" type="button" [disabled]="csvImportActive()" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" [disabled]="csvImportActive()" (click)="back()">Back</button><button class="primary" type="button" (click)="nextFromPacket()">Next</button></div>
+          <div><button class="outline" type="button" [disabled]="csvImportActive()" (click)="back()">Back</button><button class="primary" type="button" [disabled]="csvImportActive()" (click)="nextFromPacket()">Next</button></div>
         </div>
       </section>
     </main>
@@ -102,7 +102,7 @@
       <section class="panel people-panel">
         <div class="panel-heading">
           <div><div class="title-line"><h1>Person &amp; Verification Details</h1><span class="reference-chip">Reference Number/File Number : {{packetForm.controls.referenceNumber.value || '—'}}</span></div><p>Manage Information Records, General Documents, CSV Operations and Evidence Tracking in one place.</p></div>
-          <div class="search-box"><input placeholder="Search" [value]="filter()" (input)="setFilter($any($event.target).value)"><span>⌕</span></div>
+          <div class="search-box"><input placeholder="Search" [disabled]="csvImportActive()" [value]="filter()" (input)="setFilter($any($event.target).value)"><span>⌕</span></div>
         </div>
         <div class="mandatory-note">ⓘ All mandatory fields marked with <b>*</b> must be completed before proceeding.</div>
 
@@ -121,24 +121,28 @@
 
         <div class="csv-background-status" *ngIf="csvImportActive() || csvImportProgress()">
           <span class="csv-status-dot" aria-hidden="true"></span>
-          <span>{{csvImportProgress() || 'Loading CSV records in the background…'}}</span>
+          <span>
+            {{ csvImportProgress() ||
+              'CSV import is continuing in the background. Loaded rows are available for editing.' }}
+          </span>
         </div>
 
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th class="check-col"><input type="checkbox" [checked]="allVisibleSelected()" (change)="toggleAllVisible($any($event.target).checked)"></th>
+                <th class="check-col"><input type="checkbox" [disabled]="csvImportActive()" [checked]="allVisibleSelected()" (change)="toggleAllVisible($any($event.target).checked)"></th>
                 <th>Sr.<br>No. <span>▽</span></th><th>PAN <span>▽</span></th><th>Name <span>▽</span></th><th>DOB/DOI <span>▽</span></th><th>Address <span>▽</span></th><th>State <span>▽</span></th><th>Pin<br>Code <span>▽</span></th><th>E-Mail <span>▽</span></th><th>Docs <span>▽</span></th><th>Verification<br>Status <span>▽</span></th><th class="action-col"></th>
               </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of pagedRows(); trackBy: trackByCaseId">
-                <td><input type="checkbox" [disabled]="row.verificationStatus === 'Completed'" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
+              <tr *ngFor="let row of pagedRows(); let rowIndex = index; trackBy: trackByCaseId">
+                <td><input type="checkbox" [disabled]="csvImportActive() || row.verificationStatus === 'Completed'" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
                 <td>{{row.serialNo}}</td><td class="mono">{{row.pan}}</td><td>{{row.name}}</td><td>{{row.dobDoi}}</td><td>{{row.address}}</td><td>{{row.state}}</td><td>{{row.pinCode}}</td><td class="truncate" [title]="row.email">{{row.email}}</td><td>{{documentCountByCaseId().get(row.caseId) || 0}}</td>
                 <td>
                   <select *ngIf="row.verificationStatus !== 'Completed'; else completedStatus"
                           class="status-select"
+                      [disabled]="csvImportActive()"
                           [value]="row.verificationStatus"
                           (change)="setRowVerificationStatus(row, $any($event.target).value)">
                     <option value="Pending">Pending</option>
@@ -147,7 +151,7 @@
                   <ng-template #completedStatus><span class="status-select completed-status">Completed</span></ng-template>
                 </td>
                 <td class="row-actions">
-                  <button class="icon-btn" type="button" [disabled]="row.verificationStatus === 'Completed'" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(rows().indexOf(row))">✎</button>
+                  <button class="icon-btn" type="button" [disabled]="csvImportActive() || row.verificationStatus === 'Completed'" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(rowIndex)">✎</button>
                 </td>
               </tr>
               <tr *ngIf="pagedRows().length === 0"><td colspan="12" class="empty">No records found. Add a row or import a CSV.</td></tr>
@@ -157,19 +161,66 @@
 
         <div class="documents-summary" *ngIf="documents().length">
           <div><strong>General documents</strong><span>{{documents().length}} attached document(s)</span></div>
-          <button class="link-button" type="button" [disabled]="selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">Manage documents</button>
+          <button class="link-button" type="button" [disabled]="csvImportActive() || selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">Manage documents</button>
         </div>
 
         <div class="pagination">
-          <button type="button" [disabled]="page() === 1" (click)="setPage(page() - 1)" aria-label="Previous page">‹</button>
-          <ng-container *ngFor="let p of pageNumbers()">
-            <span *ngIf="p === '…'" class="page-ellipsis">…</span>
-            <button *ngIf="p !== '…'" type="button" [class.active-page]="page() === p" (click)="setPage(p)">{{p}}</button>
+
+          <button
+            type="button"
+            class="pagination-nav"
+            [disabled]="page() <= 1"
+            (click)="setPage(page() - 1)"
+            aria-label="Previous page">
+            ‹
+          </button>
+
+          <ng-container *ngFor="let p of pageNumbers(); trackBy: trackByPageNumber">
+
+            <span
+              *ngIf="p === '…'"
+              class="page-ellipsis">
+              …
+            </span>
+
+            <button
+              *ngIf="p !== '…'"
+              type="button"
+              class="page-number"
+              [class.active-page]="page() === p"
+              [attr.aria-current]="page() === p ? 'page' : null"
+              (click)="setPage(p)">
+              {{ p }}
+            </button>
+
           </ng-container>
-          <button type="button" [disabled]="page() === pageCount()" (click)="setPage(page() + 1)" aria-label="Next page">›</button>
-          <span>Showing {{pagedRows().length}} of {{visibleRowCount().toLocaleString()}} items</span>
-          <select (change)="changePageSize($any($event.target).value)">
-            <option *ngFor="let size of pageSizeOptions" [value]="size" [selected]="pageSize() === size">{{size}}</option>
+
+          <button
+            type="button"
+            class="pagination-nav"
+            [disabled]="page() >= pageCount()"
+            (click)="setPage(page() + 1)"
+            aria-label="Next page">
+            ›
+          </button>
+
+          <span class="pagination-summary">
+            Showing {{pagedRows().length}}
+            of {{visibleRowCount().toLocaleString()}} items
+          </span>
+
+          <select
+            class="page-size-select"
+            [value]="pageSize()"
+            (change)="changePageSize($any($event.target).value)"
+            aria-label="Rows per page">
+
+            <option
+              *ngFor="let size of pageSizeOptions"
+              [value]="size">
+              {{ size }}
+            </option>
+
           </select>
         </div>
 

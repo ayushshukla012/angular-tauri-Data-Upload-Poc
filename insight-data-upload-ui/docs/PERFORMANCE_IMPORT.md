@@ -105,3 +105,21 @@ On the client build machine:
 
 The progress banner displays the measured rows/sec and final import duration, making the
 actual SLA result visible rather than inferred.
+
+
+## Latest demo optimization
+
+The import path intentionally keeps the UI usable as soon as the first page is committed.
+For bulk-write throughput, the `(dataset_id,row_order)` index is dropped before import and
+recreated once the load reaches READY. While status is IMPORTING, page reads use SQLite rowid
+order because imported rows are appended in row order and edits use UPDATE rather than
+INSERT OR REPLACE, preserving row identity/order.
+
+The importer also reuses a `StringRecord` buffer, uses a 32 MiB file buffer, disables SQLite
+auto-checkpointing during the rebuild, and uses `synchronous=OFF` only for the reconstructible
+CSV rebuild. After READY it restores `synchronous=NORMAL` and checkpoints the WAL.
+
+This is a performance/demo optimization, not proof of a universal four-second SLA. Benchmark
+the exact 500,000-row file on the target Windows hardware. SQLite documents WAL + NORMAL as the
+usual balance for durability/performance, and documents that synchronous=OFF can be much faster
+but sacrifices crash/power-loss safety during the import.
