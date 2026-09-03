@@ -640,6 +640,90 @@ fn optimized_csv_insert_sql() -> &'static str {
     )"
 }
 
+#[inline(always)]
+fn trim_csv(value: Option<&str>) -> &str {
+    value.unwrap_or("").trim()
+}
+
+/// Reintroduces the CSV validation that existed in the original implementation,
+/// but keeps the hot path allocation-free and regex-free. The checks are deliberately
+/// performed in Rust while the CSV record is already in memory, so Angular never has
+/// to parse or validate the 500K+ rows.
+#[inline(always)]
+fn validate_csv_fast(record: &StringRecord, row_number: usize) -> Result<(), String> {
+    if record.len() != 19 {
+        return Err(format!(
+            "Invalid CSV data at row {row_number}: expected 19 columns but found {}.",
+            record.len()
+        ));
+    }
+
+    // Same required-field rules as the previous CSV importer. Description (column 14)
+    // was intentionally optional in the previous implementation and remains optional.
+    const REQUIRED_FIELDS: &[(usize, &str)] = &[
+        (0, "PAN"),
+        (1, "Name"),
+        (2, "DOB/DOI"),
+        (3, "Mobile"),
+        (4, "E-Mail"),
+        (5, "PIN Code"),
+        (6, "Address"),
+        (7, "State"),
+        (8, "FY"),
+        (9, "Information Type"),
+        (10, "Findings"),
+        (11, "Source"),
+        (12, "Information Value"),
+        (14, "Actionable AY"),
+        (15, "Verification Result Type"),
+        (16, "Statutory Reason"),
+        (17, "Income Escaping Assessment Value"),
+        (18, "Verification Information Value"),
+    ];
+
+    for &(index, field) in REQUIRED_FIELDS {
+        if trim_csv(record.get(index)).is_empty() {
+            return Err(format!(
+                "Invalid CSV data at row {row_number}: {field} is required."
+            ));
+        }
+    }
+
+    let pan = trim_csv(record.get(0)).as_bytes();
+    let valid_pan = pan.len() == 10
+        && pan[0].is_ascii_alphabetic()
+        && pan[1].is_ascii_alphabetic()
+        && pan[2].is_ascii_alphabetic()
+        && pan[3].is_ascii_alphabetic()
+        && pan[4].is_ascii_alphabetic()
+        && pan[5].is_ascii_digit()
+        && pan[6].is_ascii_digit()
+        && pan[7].is_ascii_digit()
+        && pan[8].is_ascii_digit()
+        && pan[9].is_ascii_alphabetic();
+
+    if !valid_pan {
+        return Err(format!("Invalid PAN at CSV row {row_number}."));
+    }
+
+    let mobile = trim_csv(record.get(3));
+    if mobile.len() != 10 || !mobile.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("Invalid Mobile at CSV row {row_number}."));
+    }
+
+    let pin_code = trim_csv(record.get(5));
+    if pin_code.len() != 6 || !pin_code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("Invalid PIN Code at CSV row {row_number}."));
+    }
+
+    let email = trim_csv(record.get(4));
+    if !email.as_bytes().contains(&b'@') || !email.as_bytes().contains(&b'.') {
+        return Err(format!("Invalid E-Mail at CSV row {row_number}."));
+    }
+
+    Ok(())
+}
+
 fn read_csv_import_config(app: &tauri::AppHandle) -> CsvImportConfig {
     let defaults = CsvImportConfig {
         batch_rows: default_import_batch_rows(),
@@ -706,8 +790,8 @@ fn run_csv_import_blocking(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
-        // Keep the parser strict only about the 19-column shape. Individual field
-        // contents are deliberately not validated or transformed.
+        // Keep the parser strict only about CSV shape. Field values are validated below
+        // without allocating or transforming the stored value.
         .from_reader(BufReader::with_capacity(32 * 1024 * 1024, file));
 
     let headers = reader
@@ -805,10 +889,11 @@ fn run_csv_import_blocking(
                     break;
                 }
 
-                // Only the CSV structure is validated. The reader enforces the fixed
-                // 19-column shape; field values may be empty or non-standard and are stored
-                // exactly as supplied. Verification remains a manual user workflow.
+                // Restore the original per-row validation, but execute it natively in Rust.
+                // No Angular-side CSV parsing, object mapping, regex validation or per-row
+                // validation work occurs for large native imports.
                 let row_number = imported + 2;
+                validate_csv_fast(&record, row_number)?;
                 let order = imported + 1;
                 let serial_no = format!("{order:07}");
                 let case_id = format!("{reference}-{serial_no}");

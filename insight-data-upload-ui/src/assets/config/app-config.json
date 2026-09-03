@@ -24,7 +24,7 @@
     "renderedRows": 50
   },
   "pagination": {
-    "defaultPageSize": 50,
+    "defaultPageSize": 10,
     "pageSizeOptions": [
       10,
       25,
