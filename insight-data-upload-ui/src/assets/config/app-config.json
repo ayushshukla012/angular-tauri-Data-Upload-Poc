@@ -38,9 +38,9 @@
     "devUrlHost": "http://localhost"
   },
   "csvImport": {
-    "batchRows": 100000,
+    "batchRows": 25000,
     "readyRows": 100,
-    "progressRows": 50000,
+    "progressRows": 10000,
     "sqliteCacheMb": 256,
     "maxFileBytes": 1073741824
   }

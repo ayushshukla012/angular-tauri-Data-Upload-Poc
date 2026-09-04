@@ -83,6 +83,7 @@ export interface SavedDraftSummary {
   rowCount: number;
   step: number;
   filePath?: string;
+  rowStoreId?: string;
 }
 
 export interface StoredDraftFile {

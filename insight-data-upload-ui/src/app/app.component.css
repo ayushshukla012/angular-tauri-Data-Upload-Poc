@@ -1821,3 +1821,61 @@ main:focus {
   cursor: not-allowed !important;
   pointer-events: none;
 }
+
+/* Local row-store operations are performed off the Angular UI thread. The overlay is
+   intentionally limited to the table area so the user sees immediate visual feedback
+   without freezing the application shell. */
+.table-wrap {
+  position: relative;
+}
+
+.table-operation-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8rem;
+  background: rgba(248, 250, 253, 0.78);
+  backdrop-filter: blur(1px);
+  pointer-events: all;
+}
+
+.table-operation-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 260px;
+  max-width: 420px;
+  padding: 1rem 1.25rem;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(21, 43, 83, 0.12);
+  text-align: center;
+}
+
+.table-operation-card strong {
+  color: #173b8f;
+  font-size: 0.9rem;
+}
+
+.table-operation-card small {
+  color: #68758a;
+  line-height: 1.4;
+}
+
+.table-operation-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid #dfe6f2;
+  border-top-color: #173b8f;
+  border-radius: 50%;
+  animation: table-operation-spin 0.8s linear infinite;
+}
+
+@keyframes table-operation-spin {
+  to { transform: rotate(360deg); }
+}

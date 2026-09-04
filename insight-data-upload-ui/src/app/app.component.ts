@@ -77,6 +77,9 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly isOnline = signal(true);
   readonly importBusy = signal(false);
   readonly finalSubmitBusy = signal(false);
+  readonly draftSaveBusy = signal(false);
+  readonly deleteBusy = signal(false);
+  private pendingNativeMutation: Promise<void> = Promise.resolve();
   readonly currentRowIndex = signal<number | null>(null);
   readonly currentDraftId = signal<string | null>(null);
   readonly selectedRows = signal<Set<string>>(new Set());
@@ -98,6 +101,9 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly csvImportElapsedMs = signal<number | null>(null);
   private csvImportUnlisteners: UnlistenFn[] = [];
   private csvImportMonitorTimer: number | null = null;
+  private onlineTimer: number | null = null;
+  private readonly handleOnline = (): void => { this.isOnline.set(true); };
+  private readonly handleOffline = (): void => { this.isOnline.set(false); };
   private nativeRowsRequestId = 0;
   readonly currentDocumentId = signal<string | null>(null);
   readonly savedDrafts = signal<SavedDraftSummary[]>([]);
@@ -110,6 +116,7 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly nativeStoreDirty = signal(false);
   readonly zoomPercent = signal(100);
   readonly dirty = signal(false);
+  private packetFormSubscription: { unsubscribe: () => void } | null = null;
   readonly closing = signal(false);
   private restoringDraft = false;
   private closeUnlisten: (() => void) | null = null;
@@ -196,6 +203,9 @@ export class AppComponent implements OnInit, OnDestroy {
 
   readonly visibleRowCount = computed(() => this.nativeMode ? this.nativeFilteredTotalRows() : this.filteredRows().length);
 
+  readonly workflowBusy = computed(() => this.csvImportActive() || this.draftSaveBusy() || this.deleteBusy());
+  readonly rowMutationBusy = computed(() => this.draftSaveBusy() || this.deleteBusy());
+
   readonly hasDataOnScreen = computed(() => {
     const packet = this.packetForm.getRawValue();
     return this.nativeTotalRows() > 0 || this.rows().length > 0 || this.documents().length > 0 || Object.values(packet).some(value => String(value ?? '').trim() !== '');
@@ -230,7 +240,7 @@ export class AppComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.onlineWatcher();
     if (this.nativeMode) this.setupCsvImportEvents();
-    this.packetForm.valueChanges.subscribe(() => {
+    this.packetFormSubscription = this.packetForm.valueChanges.subscribe(() => {
       if (!this.restoringDraft) this.markDirty();
     });
     void this.restoreLocalDraft();
@@ -247,10 +257,24 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.closeUnlisten?.();
     this.stopCsvImportMonitor();
     for (const unlisten of this.csvImportUnlisteners) unlisten();
-    if (!this.nativeMode) window.removeEventListener('beforeunload', this.handleBrowserBeforeUnload);
+    this.csvImportUnlisteners = [];
+    this.packetFormSubscription?.unsubscribe();
+    this.packetFormSubscription = null;
+    if (this.onlineTimer !== null) {
+      window.clearInterval(this.onlineTimer);
+      this.onlineTimer = null;
+    }
+    window.removeEventListener('online', this.handleOnline);
+    window.removeEventListener('offline', this.handleOffline);
+    if (this.closeUnlisten) {
+      this.closeUnlisten();
+      this.closeUnlisten = null;
+    }
+    if (!this.nativeMode) {
+      window.removeEventListener('beforeunload', this.handleBrowserBeforeUnload);
+    }
   }
 
   private setupCsvImportEvents(): void {
@@ -375,7 +399,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   back(): void {
-    if (this.csvImportActive()) return;
+    if (this.workflowBusy()) return;
     if (this.step() === 1) {
       this.step.set(0);
       return;
@@ -389,7 +413,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   nextToCreate(): void {
-    if (this.csvImportActive()) return;
+    if (this.workflowBusy()) return;
     if (!this.packetForm.valid) {
       this.step.set(1);
       this.packetEditMode.set(true);
@@ -403,7 +427,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.step.set(3);
   }
 
-  openAddRow(): void { if (this.csvImportActive()) return;
+  openAddRow(): void { if (this.workflowBusy()) return;
     this.currentRowIndex.set(null);
     this.rowForm.reset({ verificationStatus: 'Pending' });
     this.personOpen.set(true);
@@ -413,6 +437,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async editRow(index: number): Promise<void> {
+    if (this.draftSaveBusy() || this.deleteBusy()) return;
     // Rows already present in the Angular page are immediately editable even while
     // the background CSV importer is still filling the remaining dataset. Do not
     // re-query SQLite here: that extra round-trip can contend with the importer and
@@ -438,6 +463,9 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async saveRow(): Promise<void> {
+    if (this.draftSaveBusy() || this.deleteBusy()) {
+      return;
+    }
     // Saving a loaded row is allowed while the background CSV importer continues.
     // SQLite WAL + busy_timeout handles the brief writer contention.
     // No field-level validation here. Imported values are intentionally editable as-is;
@@ -476,29 +504,106 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async deleteSelected(): Promise<void> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before deleting rows.', 'info'); return; }
-    const selected = this.selectedRows(); if (!selected.size) { this.toast.show('Select at least one row to delete.', 'info'); return; } if (this.hasCompletedSelection()) { this.toast.show('Completed rows cannot be deleted.', 'info'); return; }
-    try {
-      if (this.nativeMode) {
-        await this.ensureNativeWritableStore();
-        await invoke('delete_rows', { datasetId: this.nativeRowStoreId(), caseIds: [...selected] });
-        this.nativeTotalRows.update(value => Math.max(0, value - selected.size));
-        this.markDirty(); this.selectedRows.set(new Set()); await this.refreshNativeRows();
-      }
-      else { const next = this.rows().filter(row => !selected.has(row.caseId)).map((row, i) => ({ ...row, serialNo: String(i + 1).padStart(5, '0') })); this.rows.set(next); this.selectedRows.set(new Set()); this.page.set(Math.min(this.page(), this.pageCount())); this.markDirty(); }
+    if (this.csvImportActive()) {
+      this.toast.show('Please wait until CSV loading is complete before deleting rows.', 'info');
+      return;
+    }
+    if (this.deleteBusy()) {
+      return;
+    }
+
+    const selected = this.selectedRows();
+    if (!selected.size) {
+      this.toast.show('Select at least one row to delete.', 'info');
+      return;
+    }
+    if (this.hasCompletedSelection()) {
+      this.toast.show('Completed rows cannot be deleted.', 'info');
+      return;
+    }
+
+    const selectedIds = [...selected];
+
+    if (!this.nativeMode) {
+      const next = this.rows()
+        .filter(row => !selected.has(row.caseId))
+        .map((row, i) => ({ ...row, serialNo: String(i + 1).padStart(5, '0') }));
+      this.rows.set(next);
+      this.selectedRows.set(new Set());
+      this.page.set(Math.min(this.page(), this.pageCount()));
+      this.markDirty();
       this.toast.show('Selected rows deleted.', 'success');
-    } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to delete selected rows.', 'error'); }
+      return;
+    }
+
+    const datasetId = this.nativeRowStoreId();
+    if (!datasetId) {
+      this.toast.show('Unable to determine the local row store.', 'error');
+      return;
+    }
+
+    // Optimistic UI: remove the rows from the current page immediately.
+    // The native DELETE continues in the background. If it fails, restore this
+    // page/count snapshot so the UI never silently diverges from SQLite.
+    const previousRows = this.rows();
+    const previousTotal = this.nativeTotalRows();
+    const previousFilteredTotal = this.nativeFilteredTotalRows();
+    const nextRows = previousRows.filter(row => !selected.has(row.caseId));
+
+    this.rows.set(nextRows);
+    this.nativeTotalRows.set(Math.max(0, previousTotal - selectedIds.length));
+    this.nativeFilteredTotalRows.set(Math.max(0, previousFilteredTotal - selectedIds.length));
+    this.selectedRows.set(new Set());
+    this.markDirty();
+    this.deleteBusy.set(true);
+
+    const operation = (async () => {
+      try {
+        await this.ensureNativeWritableStore();
+        await invoke('delete_rows', { datasetId, caseIds: selectedIds });
+
+        const maxPage = Math.max(1, Math.ceil(this.nativeFilteredTotalRows() / this.pageSize()));
+        if (this.page() > maxPage) {
+          this.page.set(maxPage);
+          await this.refreshNativeRows();
+        }
+
+        this.toast.show('Selected rows deleted.', 'success');
+      } catch (error) {
+        this.rows.set(previousRows);
+        this.nativeTotalRows.set(previousTotal);
+        this.nativeFilteredTotalRows.set(previousFilteredTotal);
+        const message = error instanceof Error ? error.message : 'Unable to delete selected rows.';
+        this.toast.show(message, 'error');
+        throw error;
+      } finally {
+        this.deleteBusy.set(false);
+      }
+    })();
+
+    this.pendingNativeMutation = this.pendingNativeMutation
+      .catch(() => undefined)
+      .then(() => operation)
+      .catch(() => undefined);
+
+    // Keep the UI responsive, but serialize any later draft save against this
+    // background delete so a draft cannot snapshot stale SQLite state.
+    void this.pendingNativeMutation;
+  }
+
+  private async waitForNativeMutations(): Promise<void> {
+    await this.pendingNativeMutation.catch(() => undefined);
   }
 
   async validateRows(): Promise<void> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before validating rows.', 'info'); return; }
+    if (this.workflowBusy()) { this.toast.show('Please wait until CSV loading is complete before validating rows.', 'info'); return; }
     const selectedIds = this.selectedRows(); if (!selectedIds.size) { this.toast.show('Select one or more Approved rows before validating.', 'info'); return; } if (this.hasCompletedSelection()) { this.toast.show('Completed rows cannot be validated.', 'info'); return; }
     const selected = this.rows().filter(row => selectedIds.has(row.caseId)); const notApproved = selected.filter(row => row.verificationStatus !== 'Approved'); if (notApproved.length) { this.toast.show('Only rows with Approved status can be validated. Pending and Completed rows were not changed.', 'error'); return; }
     try { if (this.nativeMode) { await this.ensureNativeWritableStore(); await invoke('set_rows_status', { datasetId: this.nativeRowStoreId(), caseIds: [...selectedIds], status: 'Completed' }); await this.refreshNativeRows(); } else { this.rows.update(current => current.map(row => selectedIds.has(row.caseId) ? { ...row, verificationStatus: 'Completed' } : row)); } this.markDirty(); this.selectedRows.set(new Set()); this.toast.show(`${selected.length} Approved row(s) converted to Completed.`, 'success'); } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to validate rows.', 'error'); }
   }
 
   async setRowVerificationStatus(row: PersonRow, value: string): Promise<void> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before updating verification status.', 'info'); return; }
+    if (this.workflowBusy()) { this.toast.show('Please wait until CSV loading is complete before updating verification status.', 'info'); return; }
     if (row.verificationStatus === 'Completed' || (value !== 'Pending' && value !== 'Approved')) return;
     try { if (this.nativeMode) { await this.ensureNativeWritableStore(); await invoke('set_rows_status', { datasetId: this.nativeRowStoreId(), caseIds: [row.caseId], status: value }); await this.refreshNativeRows(); } else { this.rows.update(current => current.map(item => item.caseId === row.caseId ? { ...item, verificationStatus: value as VerificationStatus } : item)); } this.markDirty(); } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to update verification status.', 'error'); }
   }
@@ -814,7 +919,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async exportCsv(): Promise<void> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before exporting.', 'info'); return; }
+    if (this.workflowBusy()) { this.toast.show('Please wait until CSV loading is complete before exporting.', 'info'); return; }
     try {
       if (this.nativeMode) { const path = await invoke<string | null>('export_csv_file', { datasetId: this.nativeRowStoreId(), suggestedName: `${this.packet.referenceNumber || 'data-upload'}-rows.csv` }); if (path) this.toast.show(`CSV saved to ${path}.`, 'success'); return; }
       const esc = (value: string) => `"${value.replaceAll('"', '""')}"`; const lines = [this.csvHeaders.map(esc).join(',')]; for (const r of this.rows()) { lines.push([r.pan, r.name, r.dobDoi, r.mobile, r.email, r.pinCode, r.address, r.state, r.informationDetails.informationFy, r.informationDetails.informationType, r.informationDetails.finding, r.informationDetails.source, r.informationDetails.informationValue, r.informationDetails.informationDescription, r.verificationDetails.actionableAy, r.verificationDetails.verificationResultType, r.verificationDetails.statutoryReason, r.verificationDetails.incomeEscapingAssessmentValue, r.verificationDetails.informationValue].map(esc).join(',')); } await this.saveExport(lines.join('\r\n'), `${this.packet.referenceNumber || 'data-upload'}-rows.csv`);
@@ -903,21 +1008,31 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async browseForDocuments(input: HTMLInputElement): Promise<void> {
-    if (!('__TAURI_INTERNALS__' in window)) {
-      input.click();
-      return;
+    if (this.nativeMode) {
+      try {
+        const picked = await invoke<NativePickedDocument[]>('pick_supporting_documents');
+        if (!picked.length) return;
+
+        this.generalDocumentFiles.set(picked.map(file => ({
+          file: new File([], file.file_name, {
+            type: 'application/octet-stream',
+            lastModified: Date.now()
+          }),
+          filePath: file.file_path,
+          fileSize: file.file_size
+        })));
+        return;
+      } catch (error) {
+        this.toast.show(
+          error instanceof Error ? error.message : 'Unable to select the supporting document(s).',
+          'error'
+        );
+        return;
+      }
     }
 
-    try {
-      const selection = await invoke<NativePickedDocument[]>('pick_supporting_documents');
-      this.generalDocumentFiles.set(selection.map(item => ({
-        file: new File([], item.file_name, { type: item.extension ? 'application/octet-stream' : 'application/octet-stream' }),
-        filePath: item.file_path,
-        fileSize: item.file_size
-      })));
-    } catch (error) {
-      this.toast.show(error instanceof Error ? error.message : 'Unable to select the document(s).', 'error');
-    }
+    // Browser fallback. No accept filter is used, so any file type may be selected.
+    input.click();
   }
 
   saveGeneralDocument(): void {
@@ -943,8 +1058,8 @@ export class AppComponent implements OnInit, OnDestroy {
     // For a native 500K+ dataset, never materialize every case ID in Angular just
     // to represent an "All Rows" document attachment. The document index handles
     // All Rows as a logical scope at submission time.
-    const targets = useAll ? [] : selectedRowIds;
-    if (!targets.length) {
+    const targets = selectedRowIds;
+    if (!useAll && !targets.length) {
       this.toast.show('Select at least one row for the document.', 'error');
       return;
     }
@@ -1010,18 +1125,62 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async saveDraft(): Promise<boolean> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before saving a draft.', 'info'); return false; }
-    const draftId = this.currentDraftId() ?? (this.nativeMode ? (this.nativeRowStoreId() ?? `draft-${crypto.randomUUID()}`) : undefined);
-    if (this.nativeMode && !this.nativeRowStoreId()) this.nativeRowStoreId.set(draftId ?? null);
-    const draft: DraftState = { version: 1, savedAt: new Date().toISOString(), step: this.step(), packet: this.packet, rows: this.nativeMode ? [] : this.rows(), rowStoreId: this.nativeMode ? this.nativeRowStoreId() ?? undefined : undefined, rowCount: this.nativeMode ? this.nativeTotalRows() : this.rows().length, documents: this.documents().map(doc => ({ id: doc.id, fileName: doc.fileName, docType: doc.docType, description: doc.description, attachedFor: doc.attachedFor, rowCaseIds: doc.rowCaseIds, filePath: doc.filePath, fileSize: doc.fileSize ?? doc.file?.size, fileType: doc.fileType ?? doc.file?.type, lastModified: doc.lastModified ?? doc.file?.lastModified })), draftId };
+    if (this.csvImportActive()) {
+      this.toast.show('Please wait until CSV loading is complete before saving a draft.', 'info');
+      return false;
+    }
+    if (this.draftSaveBusy()) {
+      return false;
+    }
+
+    this.draftSaveBusy.set(true);
+
     try {
+      // A delete is optimistic in the UI, but the draft must never snapshot before
+      // that native mutation has committed.
+      await this.waitForNativeMutations();
+
+      const draftId = this.currentDraftId()
+        ?? (this.nativeMode
+          ? (this.nativeRowStoreId() ?? `draft-${crypto.randomUUID()}`)
+          : undefined);
+
+      if (this.nativeMode && !this.nativeRowStoreId()) {
+        this.nativeRowStoreId.set(draftId ?? null);
+      }
+
+      const draft: DraftState = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        step: this.step(),
+        packet: this.packet,
+        rows: this.nativeMode ? [] : this.rows(),
+        rowStoreId: this.nativeMode ? this.nativeRowStoreId() ?? undefined : undefined,
+        rowCount: this.nativeMode ? this.nativeTotalRows() : this.rows().length,
+        documents: this.documents().map(doc => ({
+          id: doc.id,
+          fileName: doc.fileName,
+          docType: doc.docType,
+          description: doc.description,
+          attachedFor: doc.attachedFor,
+          rowCaseIds: doc.rowCaseIds,
+          filePath: doc.filePath,
+          fileSize: doc.fileSize ?? doc.file?.size,
+          fileType: doc.fileType ?? doc.file?.type,
+          lastModified: doc.lastModified ?? doc.file?.lastModified
+        })),
+        draftId
+      };
+
       const saved = await this.drafts.save(draft, this.documents());
       this.currentDraftId.set(saved.id);
+
       if (this.nativeMode) {
-        this.nativeRowStoreId.set(saved.id);
+        this.nativeRowStoreId.set(saved.rowStoreId ?? draft.rowStoreId ?? saved.id);
         this.nativeTotalRows.set(saved.rowCount);
         await this.refreshNativeRows();
       }
+
       this.lastSavedAt.set(draft.savedAt);
       this.nativeStoreDirty.set(false);
       this.dirty.set(false);
@@ -1031,6 +1190,8 @@ export class AppComponent implements OnInit, OnDestroy {
       const message = this.describeNativeError(error, 'Unable to save the draft locally.');
       this.toast.show(message || 'Unable to save the draft locally.', 'error');
       return false;
+    } finally {
+      this.draftSaveBusy.set(false);
     }
   }
 
@@ -1512,17 +1673,22 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly handleBrowserBeforeUnload = (event: BeforeUnloadEvent): void => { if (!this.dirty() || !this.hasDataOnScreen()) return; event.preventDefault(); event.returnValue = ''; };
 
   private onlineWatcher(): void {
-    const update = () => this.isOnline.set(navigator.onLine);
-    update();
-    window.addEventListener('online', update);
-    window.addEventListener('offline', update);
-    window.setInterval(async () => {
+    const update = async () => {
       if (!navigator.onLine) {
         this.isOnline.set(false);
         return;
       }
-      this.isOnline.set(await this.api.health());
-    }, 10000);
+      try {
+        this.isOnline.set(await this.api.health());
+      } catch {
+        this.isOnline.set(false);
+      }
+    };
+
+    void update();
+    window.addEventListener('online', this.handleOnline);
+    window.addEventListener('offline', this.handleOffline);
+    this.onlineTimer = window.setInterval(() => void update(), 10000);
   }
 
   private downloadBlob(blob: Blob, name: string): void {

@@ -5,12 +5,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 static SCHEMA_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static SAVE_DRAFT_MUTEX: Mutex<()> = Mutex::new(());
 use tauri::{Emitter, Manager};
 use tauri::path::BaseDirectory;
 
@@ -34,9 +36,9 @@ struct CsvImportConfig {
     max_file_bytes: u64,
 }
 
-fn default_import_batch_rows() -> usize { 100_000 }
+fn default_import_batch_rows() -> usize { 25_000 }
 fn default_import_ready_rows() -> usize { 100 }
-fn default_import_progress_rows() -> usize { 50_000 }
+fn default_import_progress_rows() -> usize { 10_000 }
 fn default_import_sqlite_cache_mb() -> usize { 64 }
 fn default_import_max_file_bytes() -> u64 { 0 }
 
@@ -92,6 +94,8 @@ struct SavedDraftSummary {
     step: i64,
     #[serde(rename = "filePath", skip_serializing_if = "Option::is_none")]
     file_path: Option<String>,
+    #[serde(rename = "rowStoreId", skip_serializing_if = "Option::is_none")]
+    row_store_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,6 +268,10 @@ fn ensure_metadata_columns(conn: &Connection) -> Result<(), String> {
             ("step", "INTEGER"),
             ("created_at", "TEXT"),
             ("updated_at", "TEXT"),
+            ("row_store_id", "TEXT"),
+        ]),
+        ("dataset_metadata", &[
+            ("revision", "INTEGER NOT NULL DEFAULT 0"),
         ]),
     ];
 
@@ -291,7 +299,7 @@ pub(crate) fn connection_fast(app: &tauri::AppHandle) -> Result<Connection, Stri
     let path = db_path(app)?;
     let conn = Connection::open(path).map_err(|e| format!("Unable to open SQLite database: {e}"))?;
     conn.execute_batch(
-        "PRAGMA busy_timeout=60000;",
+        "PRAGMA busy_timeout=5000;",
     )
     .map_err(|e| format!("Unable to configure SQLite connection: {e}"))?;
     Ok(conn)
@@ -349,14 +357,16 @@ pub(crate) fn connection(app: &tauri::AppHandle) -> Result<Connection, String> {
            row_count INTEGER NOT NULL,
            step INTEGER NOT NULL,
            created_at TEXT NOT NULL,
-           updated_at TEXT NOT NULL
+           updated_at TEXT NOT NULL,
+           row_store_id TEXT
          );
          CREATE TABLE IF NOT EXISTS dataset_metadata (
            dataset_id TEXT PRIMARY KEY,
            row_count INTEGER NOT NULL DEFAULT 0,
            status TEXT NOT NULL DEFAULT 'READY',
            source_file_path TEXT,
-           updated_at TEXT NOT NULL DEFAULT ''
+           updated_at TEXT NOT NULL DEFAULT '',
+           revision INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS imported_rows (
            dataset_id TEXT NOT NULL,
@@ -392,7 +402,70 @@ pub(crate) fn connection(app: &tauri::AppHandle) -> Result<Connection, String> {
     .map_err(|e| format!("Unable to initialize SQLite schema: {e}"))?;
     ensure_imported_rows_columns(&conn)?;
     ensure_metadata_columns(&conn)?;
+    ensure_revision_triggers(&conn)?;
     Ok(conn)
+}
+
+
+fn ensure_revision_triggers(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS trg_imported_rows_revision_insert
+             AFTER INSERT ON imported_rows
+             BEGIN
+                 UPDATE dataset_metadata SET revision = revision + 1,
+                     updated_at = CAST(strftime('%s','now') AS TEXT)
+                 WHERE dataset_id = NEW.dataset_id;
+             END;
+         CREATE TRIGGER IF NOT EXISTS trg_imported_rows_revision_update
+             AFTER UPDATE OF
+                 serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,
+                 verification_status,information_fy,information_source_type,
+                 information_source_description,information_type,information_description,
+                 information_value,source,finding,actionable_ay,statutory_reason,
+                 verification_result_type,income_escaping_assessment_value,
+                 verification_information_value,result_description
+             ON imported_rows
+             BEGIN
+                 UPDATE dataset_metadata SET revision = revision + 1,
+                     updated_at = CAST(strftime('%s','now') AS TEXT)
+                 WHERE dataset_id = NEW.dataset_id;
+             END;
+         CREATE TRIGGER IF NOT EXISTS trg_imported_rows_revision_delete
+             AFTER DELETE ON imported_rows
+             BEGIN
+                 UPDATE dataset_metadata SET revision = revision + 1,
+                     updated_at = CAST(strftime('%s','now') AS TEXT)
+                 WHERE dataset_id = OLD.dataset_id;
+             END;"
+    ).map_err(|e| format!("Unable to initialize row-store revision triggers: {e}"))
+}
+
+fn drop_revision_triggers(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS trg_imported_rows_revision_insert;
+         DROP TRIGGER IF EXISTS trg_imported_rows_revision_update;
+         DROP TRIGGER IF EXISTS trg_imported_rows_revision_delete;"
+    ).map_err(|e| format!("Unable to disable row-store revision triggers: {e}"))
+}
+
+fn row_store_revision(conn: &Connection, dataset_id: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COALESCE(revision,0) FROM dataset_metadata WHERE dataset_id=?1",
+        params![dataset_id],
+        |row| row.get(0),
+    ).optional()
+    .map(|value| value.unwrap_or(0))
+    .map_err(|e| format!("Unable to read row-store revision: {e}"))
+}
+
+struct RevisionTriggerGuard<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> Drop for RevisionTriggerGuard<'a> {
+    fn drop(&mut self) {
+        let _ = ensure_revision_triggers(self.conn);
+    }
 }
 
 fn now_iso() -> String {
@@ -413,13 +486,15 @@ fn sanitize_file_name(value: &str) -> String {
 }
 
 #[tauri::command]
-fn pick_file() -> Result<Option<PickedFile>, String> {
-    let Some(path) = rfd::FileDialog::new()
+async fn pick_file() -> Result<Option<PickedFile>, String> {
+    let Some(handle) = rfd::AsyncFileDialog::new()
         .set_title("Select supporting document")
         .pick_file()
+        .await
     else {
         return Ok(None);
     };
+    let path = handle.path().to_path_buf();
 
     let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
     if metadata.len() > MAX_FILE_SIZE {
@@ -448,11 +523,16 @@ fn pick_file() -> Result<Option<PickedFile>, String> {
 }
 
 #[tauri::command]
-fn pick_supporting_documents() -> Result<Vec<PickedDocument>, String> {
-    let paths = rfd::FileDialog::new()
+async fn pick_supporting_documents() -> Result<Vec<PickedDocument>, String> {
+    let handles = rfd::AsyncFileDialog::new()
         .set_title("Select supporting document(s)")
         .pick_files()
+        .await
         .unwrap_or_default();
+    let paths: Vec<std::path::PathBuf> = handles
+        .iter()
+        .map(|handle| handle.path().to_path_buf())
+        .collect();
 
     let mut result = Vec::with_capacity(paths.len());
     for path in paths {
@@ -500,6 +580,16 @@ fn read_file_bytes(file_path: String) -> Result<Vec<u8>, String> {
     fs::read(&file_path).map_err(|error| format!("Unable to read selected file: {error}"))
 }
 
+
+fn ensure_dataset_metadata_row(conn: &Connection, dataset_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO dataset_metadata(dataset_id,row_count,status,source_file_path,updated_at,revision)
+         VALUES(?1,0,'READY',NULL,?2,0)
+         ON CONFLICT(dataset_id) DO NOTHING",
+        params![dataset_id, now_iso()],
+    ).map_err(|e| format!("Unable to initialize row-store metadata: {e}"))?;
+    Ok(())
+}
 
 fn clear_dataset(conn: &Connection, dataset_id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM imported_rows WHERE dataset_id=?1", params![dataset_id]).map_err(|e| e.to_string())?;
@@ -589,8 +679,14 @@ fn execute_upsert_tx(tx: &rusqlite::Transaction<'_>, dataset_id: &str, row: &Nat
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn pick_csv_file() -> Result<Option<PickedCsvFile>, String> {
-    let Some(path) = rfd::FileDialog::new().set_title("Select CSV file").add_filter("CSV files", &["csv"]).pick_file() else { return Ok(None); };
+async fn pick_csv_file() -> Result<Option<PickedCsvFile>, String> {
+    let Some(handle) = rfd::AsyncFileDialog::new()
+        .set_title("Select CSV file")
+        .add_filter("CSV files", &["csv"])
+        .pick_file()
+        .await
+    else { return Ok(None); };
+    let path = handle.path().to_path_buf();
     let metadata = fs::metadata(&path).map_err(|e| format!("Unable to access selected CSV: {e}"))?;
     let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| "The selected CSV has an invalid name.".to_string())?.to_string();
     Ok(Some(PickedCsvFile { file_name, file_path: path.to_string_lossy().to_string(), file_size: metadata.len() }))
@@ -820,6 +916,11 @@ fn run_csv_import_blocking(
 
     let conn = connection(&app)?;
 
+    // Revision triggers are useful for tamper detection after import, but firing them
+    // 500K times during a bulk ingest would add avoidable write amplification.
+    drop_revision_triggers(&conn)?;
+    let _revision_trigger_guard = RevisionTriggerGuard { conn: &conn };
+
     // Drop any legacy row_order secondary index before the bulk load. Pagination uses
     // SQLite rowid insertion order, so no secondary B-tree is needed for the SLA path.
     conn.execute(
@@ -850,6 +951,14 @@ fn run_csv_import_blocking(
         params![dataset_id],
     )
     .map_err(|e| format!("Unable to clear dataset metadata: {e}"))?;
+    conn.execute(
+        "INSERT INTO dataset_metadata(dataset_id,row_count,status,source_file_path,updated_at,revision)
+         VALUES(?1,0,'IMPORTING',?2,?3,0)
+         ON CONFLICT(dataset_id) DO UPDATE SET row_count=0,status='IMPORTING',
+             source_file_path=excluded.source_file_path,updated_at=excluded.updated_at",
+        params![dataset_id, file_path, now_iso()],
+    )
+    .map_err(|e| format!("Unable to initialize import metadata: {e}"))?;
 
     let reference = if reference_number.trim().is_empty() {
         "LOCAL"
@@ -1005,7 +1114,8 @@ fn run_csv_import_blocking(
 
     conn.execute(
         "UPDATE dataset_metadata
-         SET row_count=?2,status='READY',source_file_path=?3,updated_at=?4
+         SET row_count=?2,status='READY',source_file_path=?3,updated_at=?4,
+             revision=revision+1
          WHERE dataset_id=?1",
         params![dataset_id, imported as i64, file_path, now_iso()],
     )
@@ -1212,13 +1322,26 @@ async fn get_row_by_case_id(app: tauri::AppHandle,dataset_id:String,case_id:Stri
 async fn upsert_row(app: tauri::AppHandle,dataset_id:String,row:NativePersonRowInput)->Result<(),String>{
     tauri::async_runtime::spawn_blocking(move || {
         let conn=connection(&app)?;
+        ensure_dataset_metadata_row(&conn, &dataset_id)?;
         execute_upsert(&conn,&dataset_id,&row)
     }).await.map_err(|e| e.to_string())?
 }
-#[tauri::command(rename_all = "camelCase")]
-fn delete_rows(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>)->Result<(),String>{let conn=connection(&app)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for id in case_ids{tx.execute("DELETE FROM imported_rows WHERE dataset_id=?1 AND case_id=?2",params![dataset_id,id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}
-#[tauri::command(rename_all = "camelCase")]
-fn set_rows_status(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>,status:String)->Result<(),String>{if !matches!(status.as_str(),"Pending"|"Approved"|"Completed"){return Err("Invalid verification status.".to_string());}let conn=connection(&app)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for id in case_ids{tx.execute("UPDATE imported_rows SET verification_status=?1 WHERE dataset_id=?2 AND case_id=?3",params![status,dataset_id,id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}
+fn delete_rows_blocking(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>)->Result<(),String>{
+    if case_ids.is_empty() { return Ok(()); }
+    let conn=connection(&app)?;
+    let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;
+    for id in case_ids {
+        tx.execute("DELETE FROM imported_rows WHERE dataset_id=?1 AND case_id=?2",params![dataset_id,id]).map_err(|e|e.to_string())?;
+    }
+    let remaining: i64 = tx.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1", params![dataset_id], |r| r.get(0)).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    conn.execute(
+        "UPDATE dataset_metadata SET row_count=?2, updated_at=?3 WHERE dataset_id=?1",
+        params![dataset_id, remaining.max(0), now_iso()],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+fn set_rows_status_blocking(app: tauri::AppHandle,dataset_id:String,case_ids:Vec<String>,status:String)->Result<(),String>{if !matches!(status.as_str(),"Pending"|"Approved"|"Completed"){return Err("Invalid verification status.".to_string());}let conn=connection(&app)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for id in case_ids{tx.execute("UPDATE imported_rows SET verification_status=?1 WHERE dataset_id=?2 AND case_id=?3",params![status,dataset_id,id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}
 #[tauri::command(rename_all = "camelCase")]
 async fn clear_row_store(app: tauri::AppHandle,dataset_id:String)->Result<(),String>{
     tauri::async_runtime::spawn_blocking(move || {
@@ -1226,32 +1349,69 @@ async fn clear_row_store(app: tauri::AppHandle,dataset_id:String)->Result<(),Str
         clear_dataset(&conn,&dataset_id)
     }).await.map_err(|e| format!("Unable to schedule row-store cleanup: {e}"))?
 }
+fn clone_row_store_blocking(app: tauri::AppHandle,source_dataset_id:String,target_dataset_id:String)->Result<usize,String>{let conn=connection(&app)?;clear_dataset(&conn,&target_dataset_id)?;let count=conn.execute("INSERT INTO imported_rows(dataset_id,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) SELECT ?1,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description FROM imported_rows WHERE dataset_id=?2",params![target_dataset_id,source_dataset_id]).map_err(|e|e.to_string())?;Ok(count)}
+fn rename_row_store_blocking(app: tauri::AppHandle,source_dataset_id:String,target_dataset_id:String)->Result<usize,String>{let conn=connection(&app)?;if source_dataset_id!=target_dataset_id{clear_dataset(&conn,&target_dataset_id)?;conn.execute("UPDATE imported_rows SET dataset_id=?1 WHERE dataset_id=?2",params![target_dataset_id,source_dataset_id]).map_err(|e|e.to_string())?;}conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",params![target_dataset_id],|r|r.get::<_,i64>(0)).map(|v|v as usize).map_err(|e|e.to_string())}
+fn seed_row_store_blocking(app: tauri::AppHandle,dataset_id:String,rows:Vec<NativePersonRowInput>)->Result<usize,String>{let conn=connection(&app)?;ensure_dataset_metadata_row(&conn,&dataset_id)?;clear_dataset(&conn,&dataset_id)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for row in &rows{execute_upsert_tx(&tx,&dataset_id,row)?;}tx.commit().map_err(|e|e.to_string())?;Ok(rows.len())}
 #[tauri::command(rename_all = "camelCase")]
-fn clone_row_store(app: tauri::AppHandle,source_dataset_id:String,target_dataset_id:String)->Result<usize,String>{let conn=connection(&app)?;clear_dataset(&conn,&target_dataset_id)?;let count=conn.execute("INSERT INTO imported_rows(dataset_id,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description) SELECT ?1,row_order,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,verification_status,information_fy,information_source_type,information_source_description,information_type,information_description,information_value,source,finding,actionable_ay,statutory_reason,verification_result_type,income_escaping_assessment_value,verification_information_value,result_description FROM imported_rows WHERE dataset_id=?2",params![target_dataset_id,source_dataset_id]).map_err(|e|e.to_string())?;Ok(count)}
+async fn delete_rows(app: tauri::AppHandle, dataset_id: String, case_ids: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_rows_blocking(app, dataset_id, case_ids))
+        .await
+        .map_err(|e| format!("Unable to schedule row deletion: {e}"))?
+}
+
 #[tauri::command(rename_all = "camelCase")]
-fn rename_row_store(app: tauri::AppHandle,source_dataset_id:String,target_dataset_id:String)->Result<usize,String>{let conn=connection(&app)?;if source_dataset_id!=target_dataset_id{clear_dataset(&conn,&target_dataset_id)?;conn.execute("UPDATE imported_rows SET dataset_id=?1 WHERE dataset_id=?2",params![target_dataset_id,source_dataset_id]).map_err(|e|e.to_string())?;}conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",params![target_dataset_id],|r|r.get::<_,i64>(0)).map(|v|v as usize).map_err(|e|e.to_string())}
+async fn set_rows_status(app: tauri::AppHandle, dataset_id: String, case_ids: Vec<String>, status: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_rows_status_blocking(app, dataset_id, case_ids, status))
+        .await
+        .map_err(|e| format!("Unable to schedule status update: {e}"))?
+}
+
 #[tauri::command(rename_all = "camelCase")]
-fn seed_row_store(app: tauri::AppHandle,dataset_id:String,rows:Vec<NativePersonRowInput>)->Result<usize,String>{let conn=connection(&app)?;clear_dataset(&conn,&dataset_id)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for row in &rows{execute_upsert_tx(&tx,&dataset_id,row)?;}tx.commit().map_err(|e|e.to_string())?;Ok(rows.len())}
+async fn clone_row_store(app: tauri::AppHandle, source_dataset_id: String, target_dataset_id: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || clone_row_store_blocking(app, source_dataset_id, target_dataset_id))
+        .await
+        .map_err(|e| format!("Unable to clone row store: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn rename_row_store(app: tauri::AppHandle, source_dataset_id: String, target_dataset_id: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || rename_row_store_blocking(app, source_dataset_id, target_dataset_id))
+        .await
+        .map_err(|e| format!("Unable to rename row store: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn seed_row_store(app: tauri::AppHandle, dataset_id: String, rows: Vec<NativePersonRowInput>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || seed_row_store_blocking(app, dataset_id, rows))
+        .await
+        .map_err(|e| format!("Unable to seed row store: {e}"))?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn export_csv_file(
     app: tauri::AppHandle,
     dataset_id: String,
     suggested_name: String,
 ) -> Result<Option<String>, String> {
+    if dataset_id.trim().is_empty() {
+        return Err("No row dataset is available to export.".to_string());
+    }
     let default_name = if suggested_name.to_ascii_lowercase().ends_with(".csv") {
         suggested_name
     } else {
         format!("{suggested_name}.csv")
     };
 
-    let Some(path) = rfd::FileDialog::new()
+    let Some(handle) = rfd::AsyncFileDialog::new()
         .set_title("Export CSV")
         .set_file_name(&default_name)
         .add_filter("CSV files", &["csv"])
         .save_file()
+        .await
     else {
         return Ok(None);
     };
+    let path = handle.path().to_path_buf();
 
     let export_path = path.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
@@ -1324,6 +1484,11 @@ struct DraftIntegrityPayload {
     version: u32,
     draft_id: String,
     draft_sha256: String,
+    #[serde(default)]
+    row_store_id: Option<String>,
+    #[serde(default)]
+    row_store_revision: Option<i64>,
+    #[serde(default)]
     row_store_sha256: Option<String>,
     files: Vec<DraftIntegrityFile>,
 }
@@ -1484,11 +1649,21 @@ fn build_integrity_manifest(
         }
     }
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let normalized_row_store_id = row_store_id
+        .filter(|v| !v.trim().is_empty())
+        .map(ToOwned::to_owned);
+    let revision = normalized_row_store_id
+        .as_deref()
+        .map(|id| row_store_revision(conn, id))
+        .transpose()?;
+
     let payload = DraftIntegrityPayload {
-        version: 1,
+        version: 2,
         draft_id: draft_id.to_string(),
         draft_sha256: sha256_bytes(&draft_bytes),
-        row_store_sha256: row_store_id.filter(|v| !v.trim().is_empty()).map(|id| row_store_hash(conn, id)).transpose()?,
+        row_store_id: normalized_row_store_id,
+        row_store_revision: revision,
+        row_store_sha256: None,
         files,
     };
     let mac = hmac_for_payload(&payload)?;
@@ -1504,23 +1679,31 @@ fn verify_draft_integrity(conn: &Connection, draft_dir: &Path, draft_id: &str) -
     }
     let manifest: DraftIntegrityManifest = serde_json::from_slice(&fs::read(&manifest_path).map_err(|e| e.to_string())?)
         .map_err(|e| format!("Invalid draft integrity manifest: {e}"))?;
-    if manifest.payload.version != 1 || manifest.payload.draft_id != draft_id {
+    if !matches!(manifest.payload.version, 1 | 2) || manifest.payload.draft_id != draft_id {
         return Err("Draft integrity manifest is invalid.".to_string());
     }
     let key = draft_integrity_key()?;
     let payload_bytes = serde_json::to_vec(&manifest.payload).map_err(|e| format!("Unable to serialize integrity payload: {e}"))?;
-    let mac_bytes = hex_decode(&manifest.mac)?;
-    let mut verifier = hmac_sha256::HMAC::new(&key);
-    verifier.update(&payload_bytes);
-    if !verifier.verify(&mac_bytes) {
+    let mac_bytes: [u8; 32] = hex_decode(&manifest.mac)?
+        .try_into()
+        .map_err(|_| "Invalid integrity MAC.".to_string())?;
+    if !hmac_sha256::HMAC::verify(&payload_bytes, &key, &mac_bytes) {
         return Err("Draft integrity verification failed: manifest was modified outside the utility.".to_string());
     }
     let draft_bytes = fs::read(&draft_path).map_err(|e| e.to_string())?;
     if sha256_bytes(&draft_bytes) != manifest.payload.draft_sha256 {
         return Err("Draft integrity verification failed: draft.json was modified outside the utility.".to_string());
     }
-    if let Some(expected) = manifest.payload.row_store_sha256.as_deref() {
-        let actual = row_store_hash(conn, draft_id)?;
+    if let Some(expected_revision) = manifest.payload.row_store_revision {
+        let row_store_id = manifest.payload.row_store_id.as_deref().unwrap_or(draft_id);
+        let actual_revision = row_store_revision(conn, row_store_id)?;
+        if actual_revision != expected_revision {
+            return Err("Draft integrity verification failed: row data was modified outside the utility.".to_string());
+        }
+    } else if let Some(expected) = manifest.payload.row_store_sha256.as_deref() {
+        // Backward compatibility for drafts created by the previous v1 integrity scheme.
+        let row_store_id = manifest.payload.row_store_id.as_deref().unwrap_or(draft_id);
+        let actual = row_store_hash(conn, row_store_id)?;
         if actual != expected {
             return Err("Draft integrity verification failed: row data was modified outside the utility.".to_string());
         }
@@ -1595,10 +1778,14 @@ fn migrate_legacy_draft(
     Ok(())
 }
 
-#[tauri::command]
-fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedDraftSummary, String> {
+fn save_draft_blocking(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedDraftSummary, String> {
+    let _save_guard = SAVE_DRAFT_MUTEX
+        .lock()
+        .map_err(|_| "Another draft save is already in progress.".to_string())?;
+
     let root = storage_root(&app)?;
     let conn = connection(&app)?;
+
     let draft: Value = serde_json::from_str(&request.draft_json)
         .map_err(|e| format!("Invalid draft JSON: {e}"))?;
     if draft.get("version").and_then(Value::as_i64).unwrap_or_default() != 1 {
@@ -1611,87 +1798,139 @@ fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedD
         .unwrap_or("")
         .to_string();
     let step = draft.get("step").and_then(Value::as_i64).unwrap_or(1);
-    let row_count = draft.get("rowCount")
+    let mut row_count = draft.get("rowCount")
         .and_then(Value::as_u64)
         .or_else(|| draft.get("rows").and_then(Value::as_array).map(|r| r.len() as u64))
         .unwrap_or(0);
-    let timestamp = draft.get("savedAt").and_then(Value::as_str).filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned).unwrap_or_else(now_iso);
+
+    let timestamp = draft.get("savedAt")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(now_iso);
+
     let draft_id = request.draft_id
         .filter(|id| !id.trim().is_empty())
         .or_else(|| draft.get("draftId").and_then(Value::as_str).map(ToOwned::to_owned))
         .unwrap_or_else(|| format!("draft-{}", uuid_like()));
-    let working_store_id = draft.get("rowStoreId").and_then(Value::as_str).unwrap_or("").to_string();
 
-    if !working_store_id.is_empty() {
+    let working_store_id = draft.get("rowStoreId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(ToOwned::to_owned);
+
+    if let Some(store_id) = working_store_id.as_deref() {
+        // The native import/delete/edit paths keep dataset_metadata.row_count current.
+        // Read that metadata row instead of scanning the 500K-row table during save.
         let current_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",
-            params![working_store_id],
+            "SELECT COALESCE(row_count,0) FROM dataset_metadata WHERE dataset_id=?1",
+            params![store_id],
             |r| r.get(0),
-        ).map_err(|e| e.to_string())?;
-        if current_count as u64 != row_count {
-            return Err(format!("Draft row-store mismatch: expected {row_count} rows but found {current_count}."));
-        }
+        ).optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+        row_count = current_count.max(0) as u64;
     }
 
     let drafts_root = root.join("drafts");
-    fs::create_dir_all(&drafts_root).map_err(|e| format!("Unable to create drafts directory: {e}"))?;
+    fs::create_dir_all(&drafts_root)
+        .map_err(|e| format!("Unable to create drafts directory: {e}"))?;
+
     let final_dir = draft_dir(&root, &draft_id);
-    let staging_dir = drafts_root.join(format!(".staging-{}-{}", safe_draft_dir_name(&draft_id), uuid_like()));
+    let staging_dir = drafts_root.join(format!(
+        ".staging-{}-{}",
+        safe_draft_dir_name(&draft_id),
+        uuid_like()
+    ));
     fs::create_dir_all(staging_dir.join("documents"))
         .map_err(|e| format!("Unable to create draft staging directory: {e}"))?;
 
     let mut draft_value = draft;
     if let Some(obj) = draft_value.as_object_mut() {
         obj.insert("draftId".to_string(), Value::String(draft_id.clone()));
-        obj.insert("rowStoreId".to_string(), Value::String(draft_id.clone()));
-        obj.insert("rowCount".to_string(), Value::Number(serde_json::Number::from(row_count)));
-        if let Some(rows) = obj.get_mut("rows") { *rows = Value::Array(Vec::new()); }
+        // Keep the physical SQLite dataset ID stable. Renaming a 500K-row store by
+        // updating dataset_id on every row was one of the main sources of draft latency
+        // and database contention.
+        obj.insert(
+            "rowStoreId".to_string(),
+            Value::String(working_store_id.clone().unwrap_or_else(|| draft_id.clone())),
+        );
+        obj.insert(
+            "rowCount".to_string(),
+            Value::Number(serde_json::Number::from(row_count)),
+        );
+        if let Some(rows) = obj.get_mut("rows") {
+            *rows = Value::Array(Vec::new());
+        }
     }
 
-    let mut documents_by_id: std::collections::HashMap<String, StoredDraftFile> = request.files
+    let documents_by_id: std::collections::HashMap<String, StoredDraftFile> = request.files
         .into_iter()
         .map(|file| (file.id.clone(), file))
         .collect();
 
     if let Some(documents) = draft_value.get_mut("documents").and_then(Value::as_array_mut) {
         for doc in documents {
-            let Some(id) = doc.get("id").and_then(Value::as_str).map(ToOwned::to_owned) else { continue; };
-            let file = documents_by_id.remove(&id);
-            let Some(file) = file else { continue; };
+            let Some(id) = doc.get("id").and_then(Value::as_str).map(ToOwned::to_owned) else {
+                continue;
+            };
+            let Some(file) = documents_by_id.get(&id) else {
+                continue;
+            };
+
             let safe_name = sanitize_file_name(&file.name);
             let relative_path = format!("documents/{}-{}", id, safe_name);
             let destination = staging_dir.join(&relative_path);
+
             if let Some(source) = file.file_path.as_ref().filter(|v| !v.trim().is_empty()) {
                 let source_path = Path::new(source);
-                let metadata = fs::metadata(source_path).map_err(|e| format!("Unable to access document '{}': {e}", file.name))?;
-                if !metadata.is_file() { return Err(format!("Document '{}' is not a regular file.", file.name)); }
-                fs::copy(source_path, &destination).map_err(|e| format!("Unable to copy document '{}': {e}", file.name))?;
+                let metadata = fs::metadata(source_path)
+                    .map_err(|e| format!("Unable to access document '{}': {e}", file.name))?;
+                if !metadata.is_file() {
+                    return Err(format!("Document '{}' is not a regular file.", file.name));
+                }
+                fs::copy(source_path, &destination)
+                    .map_err(|e| format!("Unable to copy document '{}': {e}", file.name))?;
             } else {
-                fs::write(&destination, &file.bytes).map_err(|e| format!("Unable to save document '{}': {e}", file.name))?;
+                fs::write(&destination, &file.bytes)
+                    .map_err(|e| format!("Unable to save document '{}': {e}", file.name))?;
             }
+
             if let Some(obj) = doc.as_object_mut() {
+                let file_size = if let Some(source) = file.file_path.as_ref().filter(|v| !v.trim().is_empty()) {
+                    fs::metadata(source).map(|m| m.len()).unwrap_or(file.bytes.len() as u64)
+                } else {
+                    file.bytes.len() as u64
+                };
                 obj.insert("filePath".to_string(), Value::String(relative_path));
-                obj.insert("fileSize".to_string(), Value::Number(serde_json::Number::from(file.file_path.as_ref().and_then(|p| fs::metadata(p).ok().map(|m| m.len())).unwrap_or(file.bytes.len() as u64))));
+                obj.insert(
+                    "fileSize".to_string(),
+                    Value::Number(serde_json::Number::from(file_size)),
+                );
                 obj.insert("fileType".to_string(), Value::String(file.r#type.clone()));
-                obj.insert("lastModified".to_string(), Value::Number(serde_json::Number::from(file.last_modified)));
+                obj.insert(
+                    "lastModified".to_string(),
+                    Value::Number(serde_json::Number::from(file.last_modified)),
+                );
             }
         }
     }
 
     let draft_file = staging_dir.join("draft.json");
-    fs::write(&draft_file, serde_json::to_vec_pretty(&draft_value).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("Unable to write draft file: {e}"))?;
+    fs::write(
+        &draft_file,
+        serde_json::to_vec_pretty(&draft_value).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("Unable to write draft file: {e}"))?;
 
     if final_dir.exists() {
         set_tree_readonly(&final_dir, false)?;
-        fs::remove_dir_all(&final_dir).map_err(|e| format!("Unable to replace saved draft files: {e}"))?;
+        fs::remove_dir_all(&final_dir)
+            .map_err(|e| format!("Unable to replace saved draft files: {e}"))?;
     }
 
-    if !working_store_id.is_empty() && working_store_id != draft_id {
-        rename_row_store(app.clone(), working_store_id.clone(), draft_id.clone())?;
-    }
-
+    // IMPORTANT: Do not rename the SQLite row store here. Keeping dataset_id stable
+    // turns a 500K-row UPDATE into a single metadata write.
     fs::rename(&staging_dir, &final_dir)
         .map_err(|e| format!("Unable to finalize saved draft: {e}"))?;
 
@@ -1699,49 +1938,76 @@ fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedD
         &conn,
         &final_dir,
         &draft_id,
-        if row_count > 0 { Some(draft_id.as_str()) } else { None },
+        working_store_id.as_deref(),
     )?;
-    fs::write(final_dir.join("integrity.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("Unable to write draft integrity manifest: {e}"))?;
-    fs::write(final_dir.join("draft.lock"), format!("INSIGHT-DRAFT-LOCK v1
-Draft: {draft_id}
-Managed by Insight Data Uploads Utility.
-"))
-        .map_err(|e| format!("Unable to write draft lock: {e}"))?;
+    fs::write(
+        final_dir.join("integrity.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("Unable to write draft integrity manifest: {e}"))?;
+    fs::write(
+        final_dir.join("draft.lock"),
+        format!(
+            "INSIGHT-DRAFT-LOCK v2\nDraft: {draft_id}\nManaged by Insight Data Uploads Utility.\n"
+        ),
+    )
+    .map_err(|e| format!("Unable to write draft lock: {e}"))?;
     set_tree_readonly(&final_dir, true)?;
 
     conn.execute(
-        "INSERT INTO saved_draft(id,file_path,reference_number,row_count,step,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)
-         ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path,reference_number=excluded.reference_number,
-         row_count=excluded.row_count,step=excluded.step,updated_at=excluded.updated_at",
-        params![draft_id, final_dir.join("draft.json").to_string_lossy(), reference_number, row_count as i64, step, timestamp, timestamp],
-    ).map_err(|e| format!("Unable to save draft index in SQLite: {e}"))?;
+        "INSERT INTO saved_draft(id,file_path,reference_number,row_count,step,created_at,updated_at,row_store_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path,
+             reference_number=excluded.reference_number,row_count=excluded.row_count,
+             step=excluded.step,updated_at=excluded.updated_at,row_store_id=excluded.row_store_id",
+        params![
+            draft_id,
+            final_dir.join("draft.json").to_string_lossy(),
+            reference_number,
+            row_count as i64,
+            step,
+            timestamp,
+            timestamp,
+            working_store_id.as_deref().unwrap_or(draft_id.as_str()),
+        ],
+    )
+    .map_err(|e| format!("Unable to save draft index in SQLite: {e}"))?;
 
     if let Err(error) = conn.execute(
-        "INSERT INTO upload_draft(id,upload_type,local_status,selected_file_name,selected_file_path,selected_file_size,created_at,updated_at)
+        "INSERT INTO upload_draft(
+             id,upload_type,local_status,selected_file_name,selected_file_path,
+             selected_file_size,created_at,updated_at
+         )
          VALUES(?1,'LOCAL_DRAFT','SAVED',NULL,?2,NULL,?3,?3)
-         ON CONFLICT(id) DO UPDATE SET local_status='SAVED',selected_file_path=excluded.selected_file_path,updated_at=excluded.updated_at",
+         ON CONFLICT(id) DO UPDATE SET local_status='SAVED',
+             selected_file_path=excluded.selected_file_path,updated_at=excluded.updated_at",
         params![draft_id, final_dir.join("draft.json").to_string_lossy(), timestamp],
     ) {
         eprintln!("Unable to update auxiliary upload_draft state: {error}");
     }
 
     Ok(SavedDraftSummary {
-        id: draft_id,
+        id: draft_id.clone(),
         reference_number,
         updated_at: timestamp,
         row_count: row_count as usize,
         step,
         file_path: Some(final_dir.join("draft.json").to_string_lossy().to_string()),
+        row_store_id: working_store_id.or_else(|| Some(draft_id.clone())),
     })
 }
 
-#[tauri::command]
-fn list_drafts(app: tauri::AppHandle) -> Result<Vec<SavedDraftSummary>, String> {
+#[tauri::command(rename_all = "camelCase")]
+async fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedDraftSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || save_draft_blocking(app, request))
+        .await
+        .map_err(|e| format!("Unable to save draft: {e}"))?
+}
+
+fn list_drafts_blocking(app: tauri::AppHandle) -> Result<Vec<SavedDraftSummary>, String> {
     let conn = connection(&app)?;
     let mut stmt = conn
-        .prepare("SELECT id,reference_number,updated_at,row_count,step,file_path FROM saved_draft ORDER BY updated_at DESC")
+        .prepare("SELECT id,reference_number,updated_at,row_count,step,file_path,row_store_id FROM saved_draft ORDER BY updated_at DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -1752,6 +2018,7 @@ fn list_drafts(app: tauri::AppHandle) -> Result<Vec<SavedDraftSummary>, String> 
                 row_count: row.get::<_, i64>(3)? as usize,
                 step: row.get(4)?,
                 file_path: row.get(5)?,
+                row_store_id: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1764,7 +2031,20 @@ fn list_drafts(app: tauri::AppHandle) -> Result<Vec<SavedDraftSummary>, String> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn verify_draft_integrity_command(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
+async fn list_drafts(app: tauri::AppHandle) -> Result<Vec<SavedDraftSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_drafts_blocking(app))
+        .await
+        .map_err(|e| format!("Unable to list drafts: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn verify_draft_integrity_command(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || verify_draft_integrity_blocking(app, draft_id))
+        .await
+        .map_err(|e| format!("Unable to verify draft: {e}"))?
+}
+
+fn verify_draft_integrity_blocking(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
     let root = storage_root(&app)?;
     let conn = connection(&app)?;
     let draft_path: Option<String> = conn
@@ -1787,8 +2067,7 @@ fn verify_draft_integrity_command(app: tauri::AppHandle, draft_id: String) -> Re
     verify_draft_integrity(&conn, &canonical_dir, &draft_id)
 }
 
-#[tauri::command(rename_all = "camelCase")]
-fn load_draft(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDraft>, String> {
+fn load_draft_blocking(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDraft>, String> {
     let root = storage_root(&app)?;
     let conn = connection(&app)?;
     let draft_path: Option<String> = conn
@@ -1838,31 +2117,70 @@ fn load_draft(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDr
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn delete_draft(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
+async fn load_draft(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDraft>, String> {
+    tauri::async_runtime::spawn_blocking(move || load_draft_blocking(app, draft_id))
+        .await
+        .map_err(|e| format!("Unable to load draft: {e}"))?
+}
+
+fn delete_draft_blocking(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
     let root = storage_root(&app)?;
     let conn = connection(&app)?;
+
     let draft_path: Option<String> = conn
-        .query_row("SELECT file_path FROM saved_draft WHERE id=?1", params![draft_id], |row| row.get(0))
+        .query_row(
+            "SELECT file_path FROM saved_draft WHERE id=?1",
+            params![draft_id],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM saved_draft WHERE id=?1", params![draft_id]).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM upload_draft WHERE id=?1", params![draft_id]).map_err(|e| e.to_string())?;
-    clear_dataset(&conn, &draft_id)?;
+
+    let row_store_id: Option<String> = conn
+        .query_row(
+            "SELECT row_store_id FROM saved_draft WHERE id=?1",
+            params![draft_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM saved_draft WHERE id=?1",
+        params![draft_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM upload_draft WHERE id=?1",
+        params![draft_id],
+    ).map_err(|e| e.to_string())?;
+
+    let dataset_id = row_store_id.as_deref().unwrap_or(&draft_id);
+    clear_dataset(&conn, dataset_id)?;
+
     if let Some(path) = draft_path {
         if let Some(parent) = PathBuf::from(path).parent() {
             if parent.exists() {
                 set_tree_readonly(parent, false)?;
-                fs::remove_dir_all(parent).map_err(|e| format!("Unable to remove draft files: {e}"))?;
+                fs::remove_dir_all(parent)
+                    .map_err(|e| format!("Unable to remove draft files: {e}"))?;
             }
         }
     } else {
         let dir = draft_dir(&root, &draft_id);
         if dir.exists() {
             set_tree_readonly(&dir, false)?;
-            fs::remove_dir_all(dir).map_err(|e| format!("Unable to remove draft files: {e}"))?;
+            fs::remove_dir_all(dir)
+                .map_err(|e| format!("Unable to remove draft files: {e}"))?;
         }
     }
     Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn delete_draft(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_draft_blocking(app, draft_id))
+        .await
+        .map_err(|e| format!("Unable to delete draft: {e}"))?
 }
 
 #[tauri::command]
@@ -1871,12 +2189,24 @@ fn get_storage_location(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn save_export_file(suggested_name: String, content: String) -> Result<Option<String>, String> {
-    let Some(path) = rfd::FileDialog::new().set_file_name(&suggested_name).save_file() else {
+async fn save_export_file(suggested_name: String, content: String) -> Result<Option<String>, String> {
+    let Some(handle) = rfd::AsyncFileDialog::new()
+        .set_title("Save file")
+        .set_file_name(&suggested_name)
+        .save_file()
+        .await
+    else {
         return Ok(None);
     };
-    fs::write(&path, content).map_err(|e| format!("Unable to save file: {e}"))?;
-    Ok(Some(path.to_string_lossy().to_string()))
+
+    let path = handle.path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        fs::write(&path, content.as_bytes())
+            .map_err(|e| format!("Unable to save file: {e}"))?;
+        Ok::<Option<String>, String>(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| format!("Save operation failed: {e}"))?
 }
 
 #[tauri::command]
