@@ -151,7 +151,7 @@
                   <ng-template #completedStatus><span class="status-select completed-status">Completed</span></ng-template>
                 </td>
                 <td class="row-actions">
-                  <button class="icon-btn" type="button" [disabled]="csvImportActive() || row.verificationStatus === 'Completed'" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(rowIndex)">✎</button>
+                  <button class="icon-btn" type="button" [disabled]="row.verificationStatus === 'Completed'" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(rowIndex)">✎</button>
                 </td>
               </tr>
               <tr *ngIf="pagedRows().length === 0"><td colspan="12" class="empty">No records found. Add a row or import a CSV.</td></tr>
@@ -363,7 +363,7 @@
           <label>Document Type <span>*</span><select [value]="documentType()" (change)="documentType.set($any($event.target).value)"><option>Verification Type</option><option>Evidence</option><option>Supporting Document</option><option>Other</option></select></label>
           <label>Description <span>*</span><input [value]="documentDescription()" (input)="documentDescription.set($any($event.target).value)" placeholder="Enter description"></label>
         </div>
-        <input #docFileInput id="docFileInput" type="file" multiple class="visually-hidden" (change)="handleDocumentSelection($event)">
+        <input #docFileInput id="docFileInput" type="file" accept="*/*" multiple class="visually-hidden" (change)="handleDocumentSelection($event)">
         <div class="drop-area upload-picker" role="button" tabindex="0" (click)="browseForDocuments(docFileInput)" (keydown.enter)="browseForDocuments(docFileInput)" (keydown.space)="$event.preventDefault(); browseForDocuments(docFileInput)" (dragover)="onDragOver($event)" (drop)="handleDocumentDrop($event)">
           <div class="upload-icon">☁</div>
           <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>

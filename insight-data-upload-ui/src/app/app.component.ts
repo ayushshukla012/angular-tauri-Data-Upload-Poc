@@ -413,11 +413,11 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async editRow(index: number): Promise<void> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before editing rows.', 'info'); return; }
-    let row = this.rows()[index];
-    if (this.nativeMode && row?.caseId && this.nativeRowStoreId()) {
-      row = await invoke<PersonRow | null>('get_row_by_case_id', { datasetId: this.nativeRowStoreId(), caseId: row.caseId }) ?? row;
-    }
+    // Rows already present in the Angular page are immediately editable even while
+    // the background CSV importer is still filling the remaining dataset. Do not
+    // re-query SQLite here: that extra round-trip can contend with the importer and
+    // is unnecessary because the table row already contains the values to edit.
+    const row = this.rows()[index];
     if (!row) return;
     if (row.verificationStatus === 'Completed') {
       this.toast.show('Completed rows are locked and cannot be edited.', 'info');
@@ -438,7 +438,8 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   async saveRow(): Promise<void> {
-    if (this.csvImportActive()) { this.toast.show('Please wait until CSV loading is complete before saving a row.', 'info'); return; }
+    // Saving a loaded row is allowed while the background CSV importer continues.
+    // SQLite WAL + busy_timeout handles the brief writer contention.
     // No field-level validation here. Imported values are intentionally editable as-is;
     // user verification remains a separate/manual workflow.
     const existingIndex = this.currentRowIndex(); const existing = existingIndex !== null ? this.rows()[existingIndex] : null; const v = this.rowForm.getRawValue();
@@ -939,7 +940,10 @@ export class AppComponent implements OnInit, OnDestroy {
 
     const selectedRowIds = [...this.selectedRows()];
     const useAll = this.attachedForAll() && this.visibleRowCount() > 0;
-    const targets = useAll ? this.rows().map(r => r.caseId) : selectedRowIds;
+    // For a native 500K+ dataset, never materialize every case ID in Angular just
+    // to represent an "All Rows" document attachment. The document index handles
+    // All Rows as a logical scope at submission time.
+    const targets = useAll ? [] : selectedRowIds;
     if (!targets.length) {
       this.toast.show('Select at least one row for the document.', 'error');
       return;
@@ -1072,25 +1076,30 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.finalSubmitBusy()) return; this.finalSubmitBusy.set(true); this.progressMessage.set('Submitting packet metadata…');
     try {
       await this.api.submitPacket(this.packet); const documentIndex = this.buildDocumentIndex();
-      if (this.nativeMode) { const total = this.nativeTotalRows(); this.progressMessage.set(`Submitting ${total.toLocaleString()} case record(s)…`); for (let startRow = 0; startRow < total; startRow += 100) { const pageNumber = Math.floor(startRow / 100) + 1; const data = await invoke<{ rows: PersonRow[]; totalCount: number }>('get_row_page', { datasetId: this.nativeRowStoreId(), page: pageNumber, pageSize: 100, filter: '' }); await this.runWithConcurrency(data.rows, 4, async row => { await this.api.submitCase(row, this.packet); for (const doc of documentIndex.get(row.caseId) ?? []) { this.progressMessage.set(`Uploading ${doc.fileName} for ${row.name}…`); const file = await this.materializeDocumentFile(doc); await this.api.uploadFile(file, row.caseId, { label: doc.fileName, type: doc.docType, description: doc.description, remarks: '' }); } }); } }
-      else { this.progressMessage.set(`Submitting ${this.rows().length.toLocaleString()} case record(s)…`); await this.runWithConcurrency(this.rows(), 4, async row => { await this.api.submitCase(row, this.packet); for (const doc of documentIndex.get(row.caseId) ?? []) { this.progressMessage.set(`Uploading ${doc.fileName} for ${row.name}…`); const file = await this.materializeDocumentFile(doc); await this.api.uploadFile(file, row.caseId, { label: doc.fileName, type: doc.docType, description: doc.description, remarks: '' }); } }); }
+      if (this.nativeMode) { const total = this.nativeTotalRows(); this.progressMessage.set(`Submitting ${total.toLocaleString()} case record(s)…`); for (let startRow = 0; startRow < total; startRow += 100) { const pageNumber = Math.floor(startRow / 100) + 1; const data = await invoke<{ rows: PersonRow[]; totalCount: number }>('get_row_page', { datasetId: this.nativeRowStoreId(), page: pageNumber, pageSize: 100, filter: '' }); await this.runWithConcurrency(data.rows, 4, async row => { await this.api.submitCase(row, this.packet); for (const doc of this.documentsForCase(documentIndex, row.caseId)) { this.progressMessage.set(`Uploading ${doc.fileName} for ${row.name}…`); const file = await this.materializeDocumentFile(doc); await this.api.uploadFile(file, row.caseId, { label: doc.fileName, type: doc.docType, description: doc.description, remarks: '' }); } }); } }
+      else { this.progressMessage.set(`Submitting ${this.rows().length.toLocaleString()} case record(s)…`); await this.runWithConcurrency(this.rows(), 4, async row => { await this.api.submitCase(row, this.packet); for (const doc of this.documentsForCase(documentIndex, row.caseId)) { this.progressMessage.set(`Uploading ${doc.fileName} for ${row.name}…`); const file = await this.materializeDocumentFile(doc); await this.api.uploadFile(file, row.caseId, { label: doc.fileName, type: doc.docType, description: doc.description, remarks: '' }); } }); }
       await this.drafts.clear(); if (this.nativeMode && this.nativeRowStoreId()) await invoke('clear_row_store', { datasetId: this.nativeRowStoreId() }); this.currentDraftId.set(null); this.nativeRowStoreId.set(null); this.nativeTotalRows.set(0); this.nativeFilteredTotalRows.set(0); this.nativeStoreDirty.set(false); this.dirty.set(false); this.progressMessage.set('Packet created successfully.'); this.modal.set('saveSuccess'); this.toast.show('Packet submitted successfully.', 'success');
     } catch (error) { this.toast.show(this.api.describeError(error), 'error'); this.progressMessage.set('Submission stopped. You can save the draft and retry later.'); } finally { this.finalSubmitBusy.set(false); }
   }
 
   private buildDocumentIndex(): Map<string, AttachedDocument[]> {
     const index = new Map<string, AttachedDocument[]>();
+    const allRowsKey = '__ALL_ROWS__';
     for (const doc of this.documents()) {
-      for (const caseId of doc.rowCaseIds) {
+      const keys = doc.attachedFor === 'All Rows' ? [allRowsKey] : doc.rowCaseIds;
+      for (const caseId of keys) {
         const bucket = index.get(caseId);
-        if (bucket) {
-          bucket.push(doc);
-        } else {
-          index.set(caseId, [doc]);
-        }
+        if (bucket) bucket.push(doc);
+        else index.set(caseId, [doc]);
       }
     }
     return index;
+  }
+
+  private documentsForCase(index: Map<string, AttachedDocument[]>, caseId: string): AttachedDocument[] {
+    const all = index.get('__ALL_ROWS__') ?? [];
+    const specific = index.get(caseId) ?? [];
+    return all.length && specific.length ? [...all, ...specific] : (all.length ? all : specific);
   }
 
   private async materializeDocumentFile(doc: AttachedDocument): Promise<File> {
@@ -1255,7 +1264,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private async applyDraft(bundle: LoadedDraftBundle): Promise<void> {
     const draft = bundle.draft; this.restoringDraft = true;
     try {
-      this.packetForm.patchValue(draft.packet); this.documents.set(draft.documents.map(doc => { const stored = bundle.files[doc.id]; const file = stored ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() }) : undefined; return { ...doc, file, fileSize: doc.fileSize ?? stored?.bytes?.length, fileType: doc.fileType ?? stored?.type, lastModified: doc.lastModified ?? stored?.lastModified }; })); this.currentDraftId.set(draft.draftId ?? null); this.step.set(Math.min(3, Math.max(1, draft.step))); this.packetEditMode.set(false); this.selectedRows.set(new Set()); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(draft.savedAt); this.dirty.set(false); this.nativeStoreDirty.set(false);
+      this.packetForm.patchValue(draft.packet); this.documents.set(draft.documents.map(doc => { const stored = bundle.files[doc.id]; const file = stored ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() }) : undefined; return { ...doc, file, filePath: stored ? undefined : doc.filePath, fileSize: doc.fileSize ?? stored?.bytes?.length, fileType: doc.fileType ?? stored?.type, lastModified: doc.lastModified ?? stored?.lastModified }; })); this.currentDraftId.set(draft.draftId ?? null); this.step.set(Math.min(3, Math.max(1, draft.step))); this.packetEditMode.set(false); this.selectedRows.set(new Set()); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(draft.savedAt); this.dirty.set(false); this.nativeStoreDirty.set(false);
       if (this.nativeMode) { this.nativeRowStoreId.set(draft.rowStoreId ?? draft.draftId ?? null); this.nativeTotalRows.set(draft.rowCount ?? draft.rows.length); await this.refreshNativeRows(); } else { this.rows.set(draft.rows); }
     } finally { this.restoringDraft = false; }
   }
@@ -1268,7 +1277,23 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private markDirty(): void { if (this.restoringDraft) return; this.dirty.set(true); if (this.nativeMode) this.nativeStoreDirty.set(true); }
 
-  private async ensureNativeWritableStore(): Promise<void> { if (!this.nativeMode) return; if (!this.nativeRowStoreId()) this.nativeRowStoreId.set(`rows-${crypto.randomUUID()}`); if (this.nativeStoreDirty() || !this.currentDraftId()) return; const current = this.nativeRowStoreId(); if (!current) return; const next = `rows-${crypto.randomUUID()}`; await invoke('clone_row_store', { sourceDatasetId: current, targetDatasetId: next }); this.nativeRowStoreId.set(next); this.nativeStoreDirty.set(true); }
+  private async ensureNativeWritableStore(): Promise<void> {
+    if (!this.nativeMode) return;
+    if (!this.nativeRowStoreId()) this.nativeRowStoreId.set(`rows-${crypto.randomUUID()}`);
+    if (this.nativeStoreDirty() || !this.currentDraftId()) return;
+
+    // A sealed draft is never edited in place. Verify the sealed copy before cloning it
+    // into the working row store so an external filesystem/SQLite change cannot silently
+    // become the new utility-owned version.
+    await invoke('verify_draft_integrity_command', { draftId: this.currentDraftId() });
+
+    const current = this.nativeRowStoreId();
+    if (!current) return;
+    const next = `rows-${crypto.randomUUID()}`;
+    await invoke('clone_row_store', { sourceDatasetId: current, targetDatasetId: next });
+    this.nativeRowStoreId.set(next);
+    this.nativeStoreDirty.set(true);
+  }
 
   private startCsvImportMonitor(datasetId: string): void {
     this.stopCsvImportMonitor();

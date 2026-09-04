@@ -291,7 +291,7 @@ pub(crate) fn connection_fast(app: &tauri::AppHandle) -> Result<Connection, Stri
     let path = db_path(app)?;
     let conn = Connection::open(path).map_err(|e| format!("Unable to open SQLite database: {e}"))?;
     conn.execute_batch(
-        "PRAGMA busy_timeout=5000;",
+        "PRAGMA busy_timeout=60000;",
     )
     .map_err(|e| format!("Unable to configure SQLite connection: {e}"))?;
     Ok(conn)
@@ -1233,29 +1233,508 @@ fn rename_row_store(app: tauri::AppHandle,source_dataset_id:String,target_datase
 #[tauri::command(rename_all = "camelCase")]
 fn seed_row_store(app: tauri::AppHandle,dataset_id:String,rows:Vec<NativePersonRowInput>)->Result<usize,String>{let conn=connection(&app)?;clear_dataset(&conn,&dataset_id)?;let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;for row in &rows{execute_upsert_tx(&tx,&dataset_id,row)?;}tx.commit().map_err(|e|e.to_string())?;Ok(rows.len())}
 #[tauri::command(rename_all = "camelCase")]
-fn export_csv_file(app: tauri::AppHandle,dataset_id:String,suggested_name:String)->Result<Option<String>,String>{let Some(path)=rfd::FileDialog::new().set_file_name(&suggested_name).add_filter("CSV files",&["csv"]).save_file() else{return Ok(None);};let conn=connection(&app)?;let file=File::create(&path).map_err(|e|format!("Unable to create CSV file: {e}"))?;let mut writer=BufWriter::with_capacity(1024*1024,file);writeln!(writer,"PAN,Name,DOB/DOI,Mobile,E-Mail,PIN Code,Address,State,FY,Information Type,Findings,Source,Information Value,Description,Actionable AY,Verification Result Type,Statutory Reason,Income Escaping Assessment Value,Verification Information Value").map_err(|e|e.to_string())?;let mut stmt=conn.prepare("SELECT pan,name,dob_doi,mobile,email,pin_code,address,state,information_fy,information_type,finding,source,information_value,information_description,actionable_ay,verification_result_type,statutory_reason,income_escaping_assessment_value,verification_information_value FROM imported_rows WHERE dataset_id=?1 ORDER BY row_order").map_err(|e|e.to_string())?;let mut rows=stmt.query(params![dataset_id]).map_err(|e|e.to_string())?;while let Some(row)=rows.next().map_err(|e|e.to_string())?{let mut fields=Vec::with_capacity(19);for i in 0..19{let value:String=row.get(i).map_err(|e|e.to_string())?;fields.push(format!("\"{}\"",value.replace('"',"\"\"")));}writeln!(writer,"{}",fields.join(",")).map_err(|e|e.to_string())?;}writer.flush().map_err(|e|e.to_string())?;Ok(Some(path.to_string_lossy().to_string()))}
+async fn export_csv_file(
+    app: tauri::AppHandle,
+    dataset_id: String,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let default_name = if suggested_name.to_ascii_lowercase().ends_with(".csv") {
+        suggested_name
+    } else {
+        format!("{suggested_name}.csv")
+    };
+
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Export CSV")
+        .set_file_name(&default_name)
+        .add_filter("CSV files", &["csv"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+
+    let export_path = path.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let conn = connection_fast(&app)?;
+        let file = File::create(&export_path)
+            .map_err(|e| format!("Unable to create CSV file '{}': {e}", export_path.display()))?;
+        let mut writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(BufWriter::with_capacity(4 * 1024 * 1024, file));
+
+        writer.write_record([
+            "PAN", "Name", "DOB/DOI", "Mobile", "E-Mail", "PIN Code", "Address", "State", "FY",
+            "Information Type", "Findings", "Source", "Information Value", "Description", "Actionable AY",
+            "Verification Result Type", "Statutory Reason", "Income Escaping Assessment Value",
+            "Verification Information Value",
+        ]).map_err(|e| format!("Unable to write CSV header: {e}"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT pan,name,dob_doi,mobile,email,pin_code,address,state,information_fy,information_type,
+                    finding,source,information_value,information_description,actionable_ay,
+                    verification_result_type,statutory_reason,income_escaping_assessment_value,
+                    verification_information_value
+             FROM imported_rows WHERE dataset_id=?1 ORDER BY rowid"
+        ).map_err(|e| format!("Unable to prepare CSV export query: {e}"))?;
+
+        let mut rows = stmt.query(params![dataset_id])
+            .map_err(|e| format!("Unable to read rows for CSV export: {e}"))?;
+
+        while let Some(row) = rows.next().map_err(|e| format!("Unable to read CSV export row: {e}"))? {
+            writer.write_record([
+                row.get::<_, String>(0).map_err(|e| e.to_string())?,
+                row.get::<_, String>(1).map_err(|e| e.to_string())?,
+                row.get::<_, String>(2).map_err(|e| e.to_string())?,
+                row.get::<_, String>(3).map_err(|e| e.to_string())?,
+                row.get::<_, String>(4).map_err(|e| e.to_string())?,
+                row.get::<_, String>(5).map_err(|e| e.to_string())?,
+                row.get::<_, String>(6).map_err(|e| e.to_string())?,
+                row.get::<_, String>(7).map_err(|e| e.to_string())?,
+                row.get::<_, String>(8).map_err(|e| e.to_string())?,
+                row.get::<_, String>(9).map_err(|e| e.to_string())?,
+                row.get::<_, String>(10).map_err(|e| e.to_string())?,
+                row.get::<_, String>(11).map_err(|e| e.to_string())?,
+                row.get::<_, String>(12).map_err(|e| e.to_string())?,
+                row.get::<_, String>(13).map_err(|e| e.to_string())?,
+                row.get::<_, String>(14).map_err(|e| e.to_string())?,
+                row.get::<_, String>(15).map_err(|e| e.to_string())?,
+                row.get::<_, String>(16).map_err(|e| e.to_string())?,
+                row.get::<_, String>(17).map_err(|e| e.to_string())?,
+                row.get::<_, String>(18).map_err(|e| e.to_string())?,
+            ]).map_err(|e| format!("Unable to write CSV row: {e}"))?;
+        }
+
+        writer.flush().map_err(|e| format!("Unable to finalize CSV export: {e}"))?;
+        Ok(())
+    }).await.map_err(|e| format!("CSV export task failed: {e}"))??;
+
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DraftIntegrityFile {
+    id: String,
+    relative_path: String,
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DraftIntegrityPayload {
+    version: u32,
+    draft_id: String,
+    draft_sha256: String,
+    row_store_sha256: Option<String>,
+    files: Vec<DraftIntegrityFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DraftIntegrityManifest {
+    payload: DraftIntegrityPayload,
+    mac: String,
+}
+
+fn safe_draft_dir_name(draft_id: &str) -> String {
+    let mut out = String::with_capacity(draft_id.len().min(80));
+    for ch in draft_id.chars().take(80) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() { "draft".to_string() } else { out }
+}
+
+fn draft_dir(root: &Path, draft_id: &str) -> PathBuf {
+    root.join("drafts").join(safe_draft_dir_name(draft_id))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    hex_encode(&hmac_sha256::Hash::hash(bytes))
+}
+
+fn sha256_file(path: &Path) -> Result<(String, u64), String> {
+    let file = File::open(path).map_err(|e| format!("Unable to read integrity file '{}': {e}", path.display()))?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    let mut hasher = hmac_sha256::Hash::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut reader, &mut buffer).map_err(|e| e.to_string())?;
+        if read == 0 { break; }
+        hasher.update(&buffer[..read]);
+    }
+    Ok((hex_encode(&hasher.finalize()), metadata.len()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>, String> {
+    let bytes = value.as_bytes();
+    if bytes.len() % 2 != 0 { return Err("Invalid integrity MAC.".to_string()); }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        let high = (chunk[0] as char).to_digit(16).ok_or_else(|| "Invalid integrity MAC.".to_string())?;
+        let low = (chunk[1] as char).to_digit(16).ok_or_else(|| "Invalid integrity MAC.".to_string())?;
+        out.push(((high << 4) | low) as u8);
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+fn draft_integrity_key() -> Result<Vec<u8>, String> {
+    let entry = keyring::Entry::new("com.insight.datauploads.utility", "draft-integrity-key")
+        .map_err(|e| format!("Unable to access Windows Credential Manager: {e}"))?;
+    match entry.get_secret() {
+        Ok(secret) if !secret.is_empty() => Ok(secret),
+        Ok(_) => Err("The stored draft integrity key is empty.".to_string()),
+        Err(keyring::Error::NoEntry) => {
+            let mut key = [0u8; 32];
+            getrandom::fill(&mut key).map_err(|e| format!("Unable to generate integrity key: {e}"))?;
+            entry.set_secret(&key).map_err(|e| format!("Unable to store integrity key in Windows Credential Manager: {e}"))?;
+            Ok(key.to_vec())
+        }
+        Err(error) => Err(format!("Unable to read draft integrity key from Windows Credential Manager: {error}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn draft_integrity_key() -> Result<Vec<u8>, String> {
+    // Development fallback for non-Windows builds. The packaged Windows application uses
+    // Windows Credential Manager through keyring, so the secret is not stored beside drafts.
+    Ok(b"insight-data-upload-development-integrity-key".to_vec())
+}
+
+fn set_tree_readonly(root: &Path, readonly: bool) -> Result<(), String> {
+    if !root.exists() { return Ok(()); }
+    for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.is_dir() {
+            set_tree_readonly(&path, readonly)?;
+        } else if metadata.is_file() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(readonly);
+            fs::set_permissions(&path, permissions).map_err(|e| format!("Unable to change permissions for '{}': {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn hmac_for_payload(payload: &DraftIntegrityPayload) -> Result<String, String> {
+    let key = draft_integrity_key()?;
+    let bytes = serde_json::to_vec(payload).map_err(|e| format!("Unable to serialize integrity payload: {e}"))?;
+    Ok(hex_encode(&hmac_sha256::HMAC::mac(&bytes, &key)))
+}
+
+fn row_store_hash(conn: &Connection, dataset_id: &str) -> Result<String, String> {
+    let mut hasher = hmac_sha256::Hash::new();
+    let mut stmt = conn.prepare(
+        "SELECT rowid,serial_no,case_id,pan,name,dob_doi,mobile,email,pin_code,address,state,
+                verification_status,information_fy,information_source_type,information_source_description,
+                information_type,information_description,information_value,source,finding,actionable_ay,
+                statutory_reason,verification_result_type,income_escaping_assessment_value,
+                verification_information_value,result_description
+         FROM imported_rows WHERE dataset_id=?1 ORDER BY rowid"
+    ).map_err(|e| format!("Unable to prepare draft integrity query: {e}"))?;
+    let mut rows = stmt.query(params![dataset_id]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        for index in 0..26 {
+            match index {
+                0 => { let value: i64 = row.get(index).map_err(|e| e.to_string())?; hasher.update(value.to_string().as_bytes()); }
+                _ => { let value: String = row.get(index).map_err(|e| e.to_string())?; hasher.update(value.as_bytes()); }
+            }
+            hasher.update(&[0]);
+        }
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+fn build_integrity_manifest(
+    conn: &Connection,
+    draft_dir: &Path,
+    draft_id: &str,
+    row_store_id: Option<&str>,
+) -> Result<DraftIntegrityManifest, String> {
+    let draft_path = draft_dir.join("draft.json");
+    let draft_bytes = fs::read(&draft_path).map_err(|e| format!("Unable to read draft for integrity sealing: {e}"))?;
+    let draft_value: Value = serde_json::from_slice(&draft_bytes).map_err(|e| format!("Invalid draft JSON while sealing: {e}"))?;
+    let mut files = Vec::new();
+    if let Some(documents) = draft_value.get("documents").and_then(Value::as_array) {
+        for doc in documents {
+            let Some(id) = doc.get("id").and_then(Value::as_str) else { continue; };
+            let relative_path = doc.get("filePath").and_then(Value::as_str).unwrap_or("").to_string();
+            if relative_path.is_empty() { continue; }
+            let path = draft_dir.join(&relative_path);
+            let root = draft_dir.canonicalize().map_err(|e| e.to_string())?;
+            let canonical = path.canonicalize().map_err(|e| format!("Unable to resolve attached document '{}': {e}", path.display()))?;
+            if !canonical.starts_with(&root) { return Err("Draft document path escapes the draft directory.".to_string()); }
+            let (sha256, size) = sha256_file(&canonical)?;
+            files.push(DraftIntegrityFile { id: id.to_string(), relative_path, sha256, size });
+        }
+    }
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let payload = DraftIntegrityPayload {
+        version: 1,
+        draft_id: draft_id.to_string(),
+        draft_sha256: sha256_bytes(&draft_bytes),
+        row_store_sha256: row_store_id.filter(|v| !v.trim().is_empty()).map(|id| row_store_hash(conn, id)).transpose()?,
+        files,
+    };
+    let mac = hmac_for_payload(&payload)?;
+    Ok(DraftIntegrityManifest { payload, mac })
+}
+
+fn verify_draft_integrity(conn: &Connection, draft_dir: &Path, draft_id: &str) -> Result<(), String> {
+    let lock = draft_dir.join("draft.lock");
+    let manifest_path = draft_dir.join("integrity.json");
+    let draft_path = draft_dir.join("draft.json");
+    if !lock.exists() || !manifest_path.exists() || !draft_path.exists() {
+        return Err("Draft is not sealed. Save it again using the utility before opening it.".to_string());
+    }
+    let manifest: DraftIntegrityManifest = serde_json::from_slice(&fs::read(&manifest_path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Invalid draft integrity manifest: {e}"))?;
+    if manifest.payload.version != 1 || manifest.payload.draft_id != draft_id {
+        return Err("Draft integrity manifest is invalid.".to_string());
+    }
+    let key = draft_integrity_key()?;
+    let payload_bytes = serde_json::to_vec(&manifest.payload).map_err(|e| format!("Unable to serialize integrity payload: {e}"))?;
+    let mac_bytes = hex_decode(&manifest.mac)?;
+    let mut verifier = hmac_sha256::HMAC::new(&key);
+    verifier.update(&payload_bytes);
+    if !verifier.verify(&mac_bytes) {
+        return Err("Draft integrity verification failed: manifest was modified outside the utility.".to_string());
+    }
+    let draft_bytes = fs::read(&draft_path).map_err(|e| e.to_string())?;
+    if sha256_bytes(&draft_bytes) != manifest.payload.draft_sha256 {
+        return Err("Draft integrity verification failed: draft.json was modified outside the utility.".to_string());
+    }
+    if let Some(expected) = manifest.payload.row_store_sha256.as_deref() {
+        let actual = row_store_hash(conn, draft_id)?;
+        if actual != expected {
+            return Err("Draft integrity verification failed: row data was modified outside the utility.".to_string());
+        }
+    }
+
+    let documents_dir = draft_dir.join("documents");
+    let expected_paths: std::collections::HashSet<String> = manifest.payload.files.iter().map(|f| f.relative_path.clone()).collect();
+    if documents_dir.exists() {
+        for entry in fs::read_dir(&documents_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.path().is_file() { return Err("Draft contains an unexpected documents directory entry.".to_string()); }
+            let relative = format!("documents/{}", entry.file_name().to_string_lossy());
+            if !expected_paths.contains(&relative) { return Err("Draft contains a document that was added outside the utility.".to_string()); }
+        }
+    }
+    for file in &manifest.payload.files {
+        let path = draft_dir.join(&file.relative_path);
+        let (actual_hash, actual_size) = sha256_file(&path)?;
+        if actual_size != file.size || actual_hash != file.sha256 {
+            return Err(format!("Draft integrity verification failed: document '{}' was modified outside the utility.", file.relative_path));
+        }
+    }
+    Ok(())
+}
+
+fn migrate_legacy_draft(
+    conn: &Connection,
+    draft_path: &Path,
+    draft_id: &str,
+) -> Result<(), String> {
+    let Some(draft_dir) = draft_path.parent() else { return Err("Invalid draft directory.".to_string()); };
+    set_tree_readonly(draft_dir, false)?;
+    let mut draft_value: Value = serde_json::from_slice(&fs::read(draft_path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Invalid legacy draft JSON: {e}"))?;
+    let documents_dir = draft_dir.join("documents");
+    fs::create_dir_all(&documents_dir).map_err(|e| e.to_string())?;
+
+    if let Some(documents) = draft_value.get_mut("documents").and_then(Value::as_array_mut) {
+        for doc in documents {
+            let Some(id) = doc.get("id").and_then(Value::as_str).map(ToOwned::to_owned) else { continue; };
+            let name = doc.get("fileName").and_then(Value::as_str).unwrap_or("document").to_string();
+            let safe_name = sanitize_file_name(&name);
+            let target_relative = format!("documents/{}-{}", id, safe_name);
+            let target = draft_dir.join(&target_relative);
+            if !target.exists() {
+                if let Some(source) = doc.get("filePath").and_then(Value::as_str) {
+                    let source_path = Path::new(source);
+                    if source_path.is_file() {
+                        fs::copy(source_path, &target).map_err(|e| format!("Unable to migrate document '{}': {e}", name))?;
+                    }
+                }
+            }
+            if target.is_file() {
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert("filePath".to_string(), Value::String(target_relative));
+                }
+            }
+        }
+    }
+    if let Some(obj) = draft_value.as_object_mut() {
+        obj.insert("draftId".to_string(), Value::String(draft_id.to_string()));
+        obj.insert("rowStoreId".to_string(), Value::String(draft_id.to_string()));
+    }
+    let bytes = serde_json::to_vec_pretty(&draft_value).map_err(|e| e.to_string())?;
+    fs::write(draft_path, &bytes).map_err(|e| format!("Unable to migrate legacy draft JSON: {e}"))?;
+    let manifest = build_integrity_manifest(conn, draft_dir, draft_id, Some(draft_id))?;
+    fs::write(draft_dir.join("integrity.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Unable to write draft integrity manifest: {e}"))?;
+    fs::write(draft_dir.join("draft.lock"), format!("INSIGHT-DRAFT-LOCK v1\nDraft: {draft_id}\nManaged by Insight Data Uploads Utility.\n"))
+        .map_err(|e| format!("Unable to write draft lock: {e}"))?;
+    set_tree_readonly(draft_dir, true)?;
+    Ok(())
+}
 
 #[tauri::command]
 fn save_draft(app: tauri::AppHandle, request: SaveDraftRequest) -> Result<SavedDraftSummary, String> {
-    let root=storage_root(&app)?; let conn=connection(&app)?; let draft:Value=serde_json::from_str(&request.draft_json).map_err(|e|format!("Invalid draft JSON: {e}"))?;
-    if draft.get("version").and_then(Value::as_i64).unwrap_or_default()!=1{return Err("Unsupported draft version.".to_string());}
-    let reference_number=draft.get("packet").and_then(|p|p.get("referenceNumber")).and_then(Value::as_str).unwrap_or("").to_string();
-    let step=draft.get("step").and_then(Value::as_i64).unwrap_or(1); let row_count=draft.get("rowCount").and_then(Value::as_u64).or_else(||draft.get("rows").and_then(Value::as_array).map(|r|r.len() as u64)).unwrap_or(0);
-    let updated_at=draft.get("savedAt").and_then(Value::as_str).unwrap_or("").to_string(); let draft_id=request.draft_id.filter(|id|!id.trim().is_empty()).or_else(||draft.get("draftId").and_then(Value::as_str).map(ToOwned::to_owned)).unwrap_or_else(||format!("draft-{}",uuid_like()));
-    let working_store_id=draft.get("rowStoreId").and_then(Value::as_str).unwrap_or("").to_string();
-    if !working_store_id.is_empty(){let current_count:i64=conn.query_row("SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",params![working_store_id],|r|r.get(0)).map_err(|e|e.to_string())?;if current_count as u64!=row_count{return Err(format!("Draft row-store mismatch: expected {row_count} rows but found {current_count}."));}rename_row_store(app.clone(),working_store_id,draft_id.clone())?;}
-    let dir=root.join("drafts").join(&draft_id);if dir.exists(){fs::remove_dir_all(&dir).map_err(|e|format!("Unable to replace saved draft files: {e}"))?;}fs::create_dir_all(dir.join("documents")).map_err(|e|format!("Unable to create draft directory: {e}"))?;
-    let mut draft_value=draft;if let Some(obj)=draft_value.as_object_mut(){obj.insert("draftId".to_string(),Value::String(draft_id.clone()));obj.insert("rowStoreId".to_string(),Value::String(draft_id.clone()));obj.insert("rowCount".to_string(),Value::Number(serde_json::Number::from(row_count)));if let Some(rows)=obj.get_mut("rows"){*rows=Value::Array(Vec::new());}}
-    let draft_file=dir.join("draft.json");fs::write(&draft_file,serde_json::to_string_pretty(&draft_value).map_err(|e|e.to_string())?).map_err(|e|format!("Unable to write draft file: {e}"))?;
-    let mut first_file_name=None;let mut first_file_size=None;for file in request.files{let safe_name=sanitize_file_name(&file.name);let local_path=dir.join("documents").join(format!("{}-{}",file.id,safe_name));if let Some(source)=file.file_path.as_ref().filter(|v|!v.trim().is_empty()){if !Path::new(source).exists(){return Err(format!("Unable to save document reference {}: file no longer exists.",file.name));}if first_file_name.is_none(){first_file_name=Some(file.name.clone());first_file_size=fs::metadata(source).ok().map(|m|m.len());}}else{fs::write(&local_path,&file.bytes).map_err(|e|format!("Unable to save document {}: {e}",file.name))?;if first_file_name.is_none(){first_file_name=Some(file.name);first_file_size=Some(file.bytes.len() as u64);}}}
-    let timestamp=if updated_at.is_empty(){now_iso()}else{updated_at.clone()};conn.execute("INSERT INTO saved_draft(id,file_path,reference_number,row_count,step,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path,reference_number=excluded.reference_number,row_count=excluded.row_count,step=excluded.step,updated_at=excluded.updated_at",params![draft_id,draft_file.to_string_lossy(),reference_number,row_count as i64,step,timestamp,timestamp]).map_err(|e|format!("Unable to save draft index in SQLite: {e}"))?;
-    // upload_draft is auxiliary state used by the upload flow. A draft must not become
-    // un-saveable merely because an older local POC database has a legacy upload_draft schema.
-    // saved_draft + draft.json are the authoritative local draft state.
-    if let Err(error) = conn.execute("INSERT INTO upload_draft(id,upload_type,local_status,selected_file_name,selected_file_path,selected_file_size,created_at,updated_at) VALUES(?1,'LOCAL_DRAFT','SAVED',?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET local_status='SAVED',selected_file_name=excluded.selected_file_name,selected_file_path=excluded.selected_file_path,selected_file_size=excluded.selected_file_size,updated_at=excluded.updated_at",params![draft_id,first_file_name,draft_file.to_string_lossy(),first_file_size.map(|v|v as i64),timestamp,timestamp]) {
+    let root = storage_root(&app)?;
+    let conn = connection(&app)?;
+    let draft: Value = serde_json::from_str(&request.draft_json)
+        .map_err(|e| format!("Invalid draft JSON: {e}"))?;
+    if draft.get("version").and_then(Value::as_i64).unwrap_or_default() != 1 {
+        return Err("Unsupported draft version.".to_string());
+    }
+
+    let reference_number = draft.get("packet")
+        .and_then(|p| p.get("referenceNumber"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let step = draft.get("step").and_then(Value::as_i64).unwrap_or(1);
+    let row_count = draft.get("rowCount")
+        .and_then(Value::as_u64)
+        .or_else(|| draft.get("rows").and_then(Value::as_array).map(|r| r.len() as u64))
+        .unwrap_or(0);
+    let timestamp = draft.get("savedAt").and_then(Value::as_str).filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned).unwrap_or_else(now_iso);
+    let draft_id = request.draft_id
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| draft.get("draftId").and_then(Value::as_str).map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("draft-{}", uuid_like()));
+    let working_store_id = draft.get("rowStoreId").and_then(Value::as_str).unwrap_or("").to_string();
+
+    if !working_store_id.is_empty() {
+        let current_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM imported_rows WHERE dataset_id=?1",
+            params![working_store_id],
+            |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if current_count as u64 != row_count {
+            return Err(format!("Draft row-store mismatch: expected {row_count} rows but found {current_count}."));
+        }
+    }
+
+    let drafts_root = root.join("drafts");
+    fs::create_dir_all(&drafts_root).map_err(|e| format!("Unable to create drafts directory: {e}"))?;
+    let final_dir = draft_dir(&root, &draft_id);
+    let staging_dir = drafts_root.join(format!(".staging-{}-{}", safe_draft_dir_name(&draft_id), uuid_like()));
+    fs::create_dir_all(staging_dir.join("documents"))
+        .map_err(|e| format!("Unable to create draft staging directory: {e}"))?;
+
+    let mut draft_value = draft;
+    if let Some(obj) = draft_value.as_object_mut() {
+        obj.insert("draftId".to_string(), Value::String(draft_id.clone()));
+        obj.insert("rowStoreId".to_string(), Value::String(draft_id.clone()));
+        obj.insert("rowCount".to_string(), Value::Number(serde_json::Number::from(row_count)));
+        if let Some(rows) = obj.get_mut("rows") { *rows = Value::Array(Vec::new()); }
+    }
+
+    let mut documents_by_id: std::collections::HashMap<String, StoredDraftFile> = request.files
+        .into_iter()
+        .map(|file| (file.id.clone(), file))
+        .collect();
+
+    if let Some(documents) = draft_value.get_mut("documents").and_then(Value::as_array_mut) {
+        for doc in documents {
+            let Some(id) = doc.get("id").and_then(Value::as_str).map(ToOwned::to_owned) else { continue; };
+            let file = documents_by_id.remove(&id);
+            let Some(file) = file else { continue; };
+            let safe_name = sanitize_file_name(&file.name);
+            let relative_path = format!("documents/{}-{}", id, safe_name);
+            let destination = staging_dir.join(&relative_path);
+            if let Some(source) = file.file_path.as_ref().filter(|v| !v.trim().is_empty()) {
+                let source_path = Path::new(source);
+                let metadata = fs::metadata(source_path).map_err(|e| format!("Unable to access document '{}': {e}", file.name))?;
+                if !metadata.is_file() { return Err(format!("Document '{}' is not a regular file.", file.name)); }
+                fs::copy(source_path, &destination).map_err(|e| format!("Unable to copy document '{}': {e}", file.name))?;
+            } else {
+                fs::write(&destination, &file.bytes).map_err(|e| format!("Unable to save document '{}': {e}", file.name))?;
+            }
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert("filePath".to_string(), Value::String(relative_path));
+                obj.insert("fileSize".to_string(), Value::Number(serde_json::Number::from(file.file_path.as_ref().and_then(|p| fs::metadata(p).ok().map(|m| m.len())).unwrap_or(file.bytes.len() as u64))));
+                obj.insert("fileType".to_string(), Value::String(file.r#type.clone()));
+                obj.insert("lastModified".to_string(), Value::Number(serde_json::Number::from(file.last_modified)));
+            }
+        }
+    }
+
+    let draft_file = staging_dir.join("draft.json");
+    fs::write(&draft_file, serde_json::to_vec_pretty(&draft_value).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Unable to write draft file: {e}"))?;
+
+    if final_dir.exists() {
+        set_tree_readonly(&final_dir, false)?;
+        fs::remove_dir_all(&final_dir).map_err(|e| format!("Unable to replace saved draft files: {e}"))?;
+    }
+
+    if !working_store_id.is_empty() && working_store_id != draft_id {
+        rename_row_store(app.clone(), working_store_id.clone(), draft_id.clone())?;
+    }
+
+    fs::rename(&staging_dir, &final_dir)
+        .map_err(|e| format!("Unable to finalize saved draft: {e}"))?;
+
+    let manifest = build_integrity_manifest(
+        &conn,
+        &final_dir,
+        &draft_id,
+        if row_count > 0 { Some(draft_id.as_str()) } else { None },
+    )?;
+    fs::write(final_dir.join("integrity.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Unable to write draft integrity manifest: {e}"))?;
+    fs::write(final_dir.join("draft.lock"), format!("INSIGHT-DRAFT-LOCK v1
+Draft: {draft_id}
+Managed by Insight Data Uploads Utility.
+"))
+        .map_err(|e| format!("Unable to write draft lock: {e}"))?;
+    set_tree_readonly(&final_dir, true)?;
+
+    conn.execute(
+        "INSERT INTO saved_draft(id,file_path,reference_number,row_count,step,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path,reference_number=excluded.reference_number,
+         row_count=excluded.row_count,step=excluded.step,updated_at=excluded.updated_at",
+        params![draft_id, final_dir.join("draft.json").to_string_lossy(), reference_number, row_count as i64, step, timestamp, timestamp],
+    ).map_err(|e| format!("Unable to save draft index in SQLite: {e}"))?;
+
+    if let Err(error) = conn.execute(
+        "INSERT INTO upload_draft(id,upload_type,local_status,selected_file_name,selected_file_path,selected_file_size,created_at,updated_at)
+         VALUES(?1,'LOCAL_DRAFT','SAVED',NULL,?2,NULL,?3,?3)
+         ON CONFLICT(id) DO UPDATE SET local_status='SAVED',selected_file_path=excluded.selected_file_path,updated_at=excluded.updated_at",
+        params![draft_id, final_dir.join("draft.json").to_string_lossy(), timestamp],
+    ) {
         eprintln!("Unable to update auxiliary upload_draft state: {error}");
     }
-    Ok(SavedDraftSummary{id:draft_id,reference_number,updated_at:timestamp,row_count:row_count as usize,step,file_path:Some(draft_file.to_string_lossy().to_string())})
+
+    Ok(SavedDraftSummary {
+        id: draft_id,
+        reference_number,
+        updated_at: timestamp,
+        row_count: row_count as usize,
+        step,
+        file_path: Some(final_dir.join("draft.json").to_string_lossy().to_string()),
+    })
 }
 
 #[tauri::command]
@@ -1285,7 +1764,32 @@ fn list_drafts(app: tauri::AppHandle) -> Result<Vec<SavedDraftSummary>, String> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn verify_draft_integrity_command(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
+    let root = storage_root(&app)?;
+    let conn = connection(&app)?;
+    let draft_path: Option<String> = conn
+        .query_row("SELECT file_path FROM saved_draft WHERE id=?1", params![draft_id], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(path) = draft_path else { return Err("Saved draft could not be found.".to_string()); };
+    let draft_dir_path = PathBuf::from(path)
+        .parent()
+        .ok_or_else(|| "Invalid saved draft path.".to_string())?
+        .to_path_buf();
+    let drafts_root = root.join("drafts").canonicalize().map_err(|e| e.to_string())?;
+    let canonical_dir = draft_dir_path.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_dir.starts_with(&drafts_root) {
+        return Err("Saved draft is outside the managed drafts directory.".to_string());
+    }
+    if !canonical_dir.join("integrity.json").exists() {
+        migrate_legacy_draft(&conn, &canonical_dir.join("draft.json"), &draft_id)?;
+    }
+    verify_draft_integrity(&conn, &canonical_dir, &draft_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn load_draft(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDraft>, String> {
+    let root = storage_root(&app)?;
     let conn = connection(&app)?;
     let draft_path: Option<String> = conn
         .query_row("SELECT file_path FROM saved_draft WHERE id=?1", params![draft_id], |row| row.get(0))
@@ -1293,51 +1797,38 @@ fn load_draft(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDr
         .map_err(|e| e.to_string())?;
     let Some(draft_path) = draft_path else { return Ok(None); };
     let path = PathBuf::from(draft_path);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let draft_json = fs::read_to_string(&path).map_err(|e| format!("Unable to read saved draft: {e}"))?;
-    let documents_dir = path.parent().unwrap_or(Path::new(".")).join("documents");
-    let draft_value: Value = serde_json::from_str(&draft_json).map_err(|e| format!("Invalid saved draft JSON: {e}"))?;
-    let documents = draft_value
-        .get("documents")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    if !path.exists() { return Ok(None); }
 
+    let drafts_root = root.join("drafts").canonicalize().map_err(|e| e.to_string())?;
+    let draft_dir_path = path.parent().ok_or_else(|| "Invalid saved draft path.".to_string())?;
+    let canonical_dir = draft_dir_path.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_dir.starts_with(&drafts_root) {
+        return Err("Saved draft is outside the managed drafts directory.".to_string());
+    }
+
+    if !canonical_dir.join("integrity.json").exists() {
+        migrate_legacy_draft(&conn, &canonical_dir.join("draft.json"), &draft_id)?;
+    }
+    verify_draft_integrity(&conn, &canonical_dir, &draft_id)?;
+
+    let draft_json = fs::read_to_string(canonical_dir.join("draft.json"))
+        .map_err(|e| format!("Unable to read saved draft: {e}"))?;
+    let draft_value: Value = serde_json::from_str(&draft_json)
+        .map_err(|e| format!("Invalid saved draft JSON: {e}"))?;
     let mut files = Vec::new();
-    for doc in documents {
-        let Some(id) = doc.get("id").and_then(Value::as_str) else { continue; };
-        let Some(name) = doc.get("fileName").and_then(Value::as_str) else { continue; };
-        if let Some(source_path) = doc.get("filePath").and_then(Value::as_str) {
-            if Path::new(source_path).exists() {
-                files.push(StoredDraftFileResponse {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    r#type: doc.get("fileType").and_then(Value::as_str).unwrap_or("").to_string(),
-                    last_modified: doc.get("lastModified").and_then(Value::as_i64).unwrap_or(0),
-                    bytes: Vec::new(),
-                });
-                continue;
-            }
-        }
-        let mut candidates = Vec::new();
-        if documents_dir.exists() {
-            for entry in fs::read_dir(&documents_dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                if file_name.starts_with(&format!("{}-", id)) {
-                    candidates.push(entry.path());
-                }
-            }
-        }
-        if let Some(file_path) = candidates.first() {
-            let bytes = fs::read(file_path).map_err(|e| format!("Unable to read saved document {name}: {e}"))?;
+
+    if let Some(documents) = draft_value.get("documents").and_then(Value::as_array) {
+        for doc in documents {
+            let Some(id) = doc.get("id").and_then(Value::as_str) else { continue; };
+            let Some(name) = doc.get("fileName").and_then(Value::as_str) else { continue; };
+            let Some(relative) = doc.get("filePath").and_then(Value::as_str).filter(|v| !v.trim().is_empty()) else { continue; };
+            let document_path = canonical_dir.join(relative);
+            let bytes = fs::read(&document_path).map_err(|e| format!("Unable to read saved document '{name}': {e}"))?;
             files.push(StoredDraftFileResponse {
                 id: id.to_string(),
                 name: name.to_string(),
-                r#type: String::new(),
-                last_modified: 0,
+                r#type: doc.get("fileType").and_then(Value::as_str).unwrap_or("").to_string(),
+                last_modified: doc.get("lastModified").and_then(Value::as_i64).unwrap_or(0),
                 bytes,
             });
         }
@@ -1348,6 +1839,7 @@ fn load_draft(app: tauri::AppHandle, draft_id: String) -> Result<Option<LoadedDr
 
 #[tauri::command(rename_all = "camelCase")]
 fn delete_draft(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
+    let root = storage_root(&app)?;
     let conn = connection(&app)?;
     let draft_path: Option<String> = conn
         .query_row("SELECT file_path FROM saved_draft WHERE id=?1", params![draft_id], |row| row.get(0))
@@ -1359,8 +1851,15 @@ fn delete_draft(app: tauri::AppHandle, draft_id: String) -> Result<(), String> {
     if let Some(path) = draft_path {
         if let Some(parent) = PathBuf::from(path).parent() {
             if parent.exists() {
+                set_tree_readonly(parent, false)?;
                 fs::remove_dir_all(parent).map_err(|e| format!("Unable to remove draft files: {e}"))?;
             }
+        }
+    } else {
+        let dir = draft_dir(&root, &draft_id);
+        if dir.exists() {
+            set_tree_readonly(&dir, false)?;
+            fs::remove_dir_all(dir).map_err(|e| format!("Unable to remove draft files: {e}"))?;
         }
     }
     Ok(())
@@ -1457,7 +1956,7 @@ fn main() {
             pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_csv_import_status,get_row_page,get_row_by_case_id,
             commands::data_commands::get_runtime_config,commands::data_commands::get_row_window,commands::data_commands::stream_row_window,
             upsert_row,delete_rows,set_rows_status,clear_row_store,clone_row_store,rename_row_store,seed_row_store,export_csv_file,
-            save_draft,list_drafts,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website
+            save_draft,list_drafts,verify_draft_integrity_command,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website
         ])
         .run(tauri::generate_context!())
         .expect("error while running Insight Data Upload Utility");
