@@ -74,6 +74,8 @@ export interface DraftState {
   rowCount?: number;
   documents: Array<Omit<AttachedDocument, 'file'>>;
   draftId?: string;
+  /** Checkbox selection preserved across the native-browser login round trip. */
+  selectedRowIds?: string[];
 }
 
 export interface SavedDraftSummary {

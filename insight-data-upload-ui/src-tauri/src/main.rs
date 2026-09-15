@@ -5,11 +5,15 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
+use std::net::TcpListener;
+
+#[cfg(target_os = "windows")]
+use keyring::Entry;
 
 static SCHEMA_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SAVE_DRAFT_MUTEX: Mutex<()> = Mutex::new(());
@@ -20,6 +24,27 @@ mod commands;
 
 
 const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredOAuthTokens {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_at: Option<i64>,
+    #[serde(default)]
+    token_type: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct OAuthCallbackPayload {
+    url: String,
+}
+
+const OAUTH_CREDENTIAL_SERVICE: &str = "insight-data-upload";
+const OAUTH_CREDENTIAL_USER: &str = "oauth-tokens";
+
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -2262,6 +2287,149 @@ fn open_government_website(url: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Authentication URL must use http or https.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| format!("Unable to open the default browser: {e}"))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Unable to open the default browser: {e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Unable to open the default browser: {e}"))?;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        return Err("Opening the system browser is not supported on this operating system.".to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn prepare_oauth_callback(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Unable to open OAuth loopback listener: {e}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|e| format!("Unable to resolve OAuth callback port: {e}"))?;
+    let callback_path = if path.starts_with('/') { path } else { format!("/{path}") };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok((mut stream, _peer)) = listener.accept() else { return; };
+        let mut buffer = [0u8; 8192];
+        let Ok(size) = stream.read(&mut buffer) else { return; };
+        let request = String::from_utf8_lossy(&buffer[..size]);
+        let request_line = request.lines().next().unwrap_or_default();
+        let mut parts = request_line.split_whitespace();
+        let _method = parts.next();
+        let target = parts.next().unwrap_or("/");
+        let callback_url = if target.starts_with("http://") {
+            target.to_string()
+        } else {
+            format!("http://{}{}", address, target)
+        };
+
+        let body = "<html><body><h3>Login complete</h3><p>You can return to the Insight Data Upload Utility.</p><script>window.close()</script></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+        let _ = app.emit("oauth-callback", OAuthCallbackPayload { url: callback_url });
+    });
+
+    Ok(format!("http://{}{}", address, callback_path))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn store_oauth_tokens(
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<i64>,
+    token_type: Option<String>,
+) -> Result<(), String> {
+    let tokens = StoredOAuthTokens { access_token, refresh_token, expires_at, token_type };
+    let serialized = serde_json::to_string(&tokens).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let entry = Entry::new(OAUTH_CREDENTIAL_SERVICE, OAUTH_CREDENTIAL_USER)
+            .map_err(|e| format!("Unable to access Windows Credential Manager: {e}"))?;
+        entry
+            .set_password(&serialized)
+            .map_err(|e| format!("Unable to store OAuth tokens in Windows Credential Manager: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // TODO: Add platform-native secure storage (macOS Keychain / Linux Secret Service).
+        // For the POC the token remains memory-only on other OSes; never write it to files/localStorage.
+        let _ = serialized;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn get_oauth_tokens() -> Result<Option<StoredOAuthTokens>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let entry = Entry::new(OAUTH_CREDENTIAL_SERVICE, OAUTH_CREDENTIAL_USER)
+            .map_err(|e| format!("Unable to access Windows Credential Manager: {e}"))?;
+        match entry.get_password() {
+            Ok(value) => serde_json::from_str(&value).map(Some).map_err(|e| format!("Stored OAuth credential is invalid: {e}")),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(format!("Unable to read OAuth tokens from Windows Credential Manager: {e}")),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // TODO: Add platform-native secure storage (macOS Keychain / Linux Secret Service).
+        Err("Secure OAuth token storage is currently implemented for Windows only.".to_string())
+    }
+}
+
+#[tauri::command]
+fn clear_oauth_tokens() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let entry = Entry::new(OAUTH_CREDENTIAL_SERVICE, OAUTH_CREDENTIAL_USER)
+            .map_err(|e| format!("Unable to access Windows Credential Manager: {e}"))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("Unable to clear OAuth tokens from Windows Credential Manager: {e}")),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // TODO: Add platform-native secure storage removal for macOS/Linux.
+        Ok(())
+    }
+}
+
 fn uuid_like() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -2286,7 +2454,7 @@ fn main() {
             pick_file,pick_supporting_documents,read_file_bytes,pick_csv_file,import_csv_to_store,get_csv_import_status,get_row_page,get_row_by_case_id,
             commands::data_commands::get_runtime_config,commands::data_commands::get_row_window,commands::data_commands::stream_row_window,
             upsert_row,delete_rows,set_rows_status,clear_row_store,clone_row_store,rename_row_store,seed_row_store,export_csv_file,
-            save_draft,list_drafts,verify_draft_integrity_command,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website
+            save_draft,list_drafts,verify_draft_integrity_command,load_draft,delete_draft,get_storage_location,save_export_file,cleanup_temp_files,get_app_version,open_government_website,open_external_url,prepare_oauth_callback,store_oauth_tokens,get_oauth_tokens,clear_oauth_tokens
         ])
         .run(tauri::generate_context!())
         .expect("error while running Insight Data Upload Utility");

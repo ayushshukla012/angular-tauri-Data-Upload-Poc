@@ -10,5 +10,5 @@ const port = Number(config.tooling?.devServerPort);
 if (!host || !Number.isFinite(port)) throw new Error('Runtime tooling configuration is missing devServerHost/devServerPort.');
 
 const cli = join(projectRoot, 'node_modules/@angular/cli/bin/ng.js');
-const child = spawn(process.execPath, [cli, 'serve', '--host', host, '--port', String(port)], { cwd: projectRoot, stdio: 'inherit' });
+const child = spawn(process.execPath, [cli, 'serve', '--host', host, '--port', String(port), '--proxy-config', 'proxy.conf.json'], { cwd: projectRoot, stdio: 'inherit' });
 child.on('exit', code => process.exit(code ?? 0));

@@ -1879,3 +1879,18 @@ main:focus {
 @keyframes table-operation-spin {
   to { transform: rotate(360deg); }
 }
+
+.auth-user {
+  display: inline-flex;
+  align-items: center;
+  max-width: 180px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #eef3ff;
+  color: #173b8f;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

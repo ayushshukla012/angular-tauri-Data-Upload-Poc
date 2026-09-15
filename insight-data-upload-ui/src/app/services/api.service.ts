@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { environment } from '../../environments/environment';
+import { AuthService } from './auth.service';
 import {
   CaseResponse,
   InitiateUploadResponse,
@@ -15,11 +16,23 @@ import {
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = environment.apiBaseUrl.replace(/\/$/, '');
+  private readonly auth = inject(AuthService);
+  private readonly bffBase = (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)
+    ? environment.bffBaseUrl.replace(/\/$/, '')
+    : '/bff';
+
+  private proxy(path: string): string {
+    return `${this.bffBase}/api/bff/proxy${path.startsWith('/') ? path : `/${path}`}`;
+  }
+
+  private authHeaders(): HttpHeaders {
+    const token = this.auth.getAccessToken();
+    return token ? new HttpHeaders({ Authorization: `Bearer ${token}` }) : new HttpHeaders();
+  }
 
   async health(): Promise<boolean> {
     try {
-      await firstValueFrom(this.http.get<{ status: string }>(`${this.base}/actuator/health`));
+      await firstValueFrom(this.http.get<{ status: string }>(`${this.bffBase}/actuator/health`));
       return true;
     } catch {
       return false;
@@ -27,17 +40,19 @@ export class ApiService {
   }
 
   async submitPacket(packet: PacketDetails): Promise<PacketResponse> {
-    return firstValueFrom(this.http.post<PacketResponse>(`${this.base}/api/v1/packets`, {
+    if (!(await this.auth.ensureValidAccessToken())) throw new Error('Authentication is required to create a packet.');
+    return firstValueFrom(this.http.post<PacketResponse>(this.proxy('/api/v1/packets'), {
       batchNumber: packet.referenceNumber,
       description: packet.description,
       submittingPersonName: packet.submittingPersonName,
       submittingPersonAddress: packet.submittingPersonAddress,
       submittingPersonMobile: packet.submittingPersonMobile,
       submittingPersonEmail: packet.submittingPersonEmail
-    }));
+    }, { headers: this.authHeaders(), withCredentials: true }));
   }
 
   async submitCase(row: PersonRow, packet: PacketDetails): Promise<CaseResponse> {
+    if (!(await this.auth.ensureValidAccessToken())) throw new Error('Authentication is required to submit case records.');
     const body = {
       caseId: row.caseId,
       referenceNumber: packet.referenceNumber,
@@ -70,11 +85,12 @@ export class ApiService {
       }
     };
 
-    return firstValueFrom(this.http.post<CaseResponse>(`${this.base}/api/v1/cases`, body));
+    return firstValueFrom(this.http.post<CaseResponse>(this.proxy('/api/v1/cases'), body, { headers: this.authHeaders(), withCredentials: true }));
   }
 
   async initiateUpload(file: File, caseId?: string, doc?: { label: string; type: string; description: string; remarks: string }): Promise<InitiateUploadResponse> {
-    return firstValueFrom(this.http.post<InitiateUploadResponse>(`${this.base}/api/v1/uploads/initiate`, {
+    if (!(await this.auth.ensureValidAccessToken())) throw new Error('Authentication is required to upload supporting documents.');
+    return firstValueFrom(this.http.post<InitiateUploadResponse>(this.proxy('/api/v1/uploads/initiate'), {
       fileName: file.name,
       fileSizeBytes: file.size,
       caseId: caseId || null,
@@ -82,7 +98,7 @@ export class ApiService {
       docType: doc?.type || null,
       description: doc?.description || null,
       remarks: doc?.remarks || null
-    }));
+    }, { headers: this.authHeaders(), withCredentials: true }));
   }
 
   async uploadSingle(file: File, init: InitiateUploadResponse): Promise<void> {
@@ -92,16 +108,19 @@ export class ApiService {
   }
 
   async presignPart(uploadId: string, partNumber: number): Promise<PresignPartResponse> {
-    return firstValueFrom(this.http.post<PresignPartResponse>(`${this.base}/api/v1/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}/presign`, {}));
+    if (!(await this.auth.ensureValidAccessToken())) throw new Error('Authentication is required for multipart upload.');
+    return firstValueFrom(this.http.post<PresignPartResponse>(this.proxy(`/api/v1/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}/presign`), {}, { headers: this.authHeaders(), withCredentials: true }));
   }
 
   async listParts(uploadId: string): Promise<UploadedPartSummary[]> {
-    const response = await firstValueFrom(this.http.get<{ parts: UploadedPartSummary[] }>(`${this.base}/api/v1/uploads/${encodeURIComponent(uploadId)}/parts`));
+    if (!(await this.auth.ensureValidAccessToken())) throw new Error('Authentication is required for multipart upload.');
+    const response = await firstValueFrom(this.http.get<{ parts: UploadedPartSummary[] }>(this.proxy(`/api/v1/uploads/${encodeURIComponent(uploadId)}/parts`), { headers: this.authHeaders(), withCredentials: true }));
     return response.parts;
   }
 
   async completeUpload(uploadId: string): Promise<void> {
-    await firstValueFrom(this.http.post(`${this.base}/api/v1/uploads/${encodeURIComponent(uploadId)}/complete`, {}));
+    if (!(await this.auth.ensureValidAccessToken())) throw new Error('Authentication is required to complete the upload.');
+    await firstValueFrom(this.http.post(this.proxy(`/api/v1/uploads/${encodeURIComponent(uploadId)}/complete`), {}, { headers: this.authHeaders(), withCredentials: true }));
   }
 
   async uploadFile(file: File, caseId: string | undefined, doc?: { label: string; type: string; description: string; remarks: string }): Promise<void> {
@@ -146,6 +165,8 @@ export class ApiService {
       if (error.status === 0) {
         return 'Unable to connect to the server. Please ensure the backend service is running and try again.';
       }
+      if (error.status === 401) return 'Your sign-in session has expired. Please sign in again.';
+      if (error.status === 403) return 'You are authenticated but are not authorized for this operation.';
       const api = error.error as { message?: string; code?: string } | undefined;
       return api?.message || api?.code || `Request failed with HTTP ${error.status}.`;
     }

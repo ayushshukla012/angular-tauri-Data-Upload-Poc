@@ -43,5 +43,13 @@
     "progressRows": 10000,
     "sqliteCacheMb": 256,
     "maxFileBytes": 1073741824
+  },
+  "bff": {
+    "baseUrl": "http://localhost:8082",
+    "authorizationPath": "/oauth2/authorization/insight-bff",
+    "nativeTokenPath": "/api/bff/native/token",
+    "nativeRefreshPath": "/api/bff/native/refresh",
+    "nativeCallbackPath": "/oauth/callback",
+    "proxyBasePath": "/api/bff/proxy"
   }
 }

@@ -8,6 +8,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ApiService } from './services/api.service';
 import { DraftStoreService } from './services/draft-store.service';
 import { ToastService } from './services/toast.service';
+import { AuthService } from './services/auth.service';
 import { AttachedDocument, DraftState, InformationDetails, LoadedDraftBundle, PacketDetails, PersonRow, SavedDraftSummary, VerificationDetails, VerificationStatus } from './models';
 
 interface NativePickedFile {
@@ -66,6 +67,7 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly api = inject(ApiService);
   readonly drafts = inject(DraftStoreService);
   readonly toast = inject(ToastService);
+  readonly auth = inject(AuthService);
   readonly appConfig = inject(AppConfigService);
   private readonly ngZone = inject(NgZone);
 
@@ -118,6 +120,7 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly dirty = signal(false);
   private packetFormSubscription: { unsubscribe: () => void } | null = null;
   readonly closing = signal(false);
+  readonly authLoading = signal(false);
   private restoringDraft = false;
   private closeUnlisten: (() => void) | null = null;
   private readonly tauriWindow = this.nativeMode ? getCurrentWindow() : null;
@@ -238,6 +241,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    void this.auth.bootstrap();
     this.onlineWatcher();
     if (this.nativeMode) this.setupCsvImportEvents();
     this.packetFormSubscription = this.packetForm.valueChanges.subscribe(() => {
@@ -1169,7 +1173,8 @@ export class AppComponent implements OnInit, OnDestroy {
           fileType: doc.fileType ?? doc.file?.type,
           lastModified: doc.lastModified ?? doc.file?.lastModified
         })),
-        draftId
+        draftId,
+        selectedRowIds: [...this.selectedRows()]
       };
 
       const saved = await this.drafts.save(draft, this.documents());
@@ -1233,8 +1238,43 @@ export class AppComponent implements OnInit, OnDestroy {
     void file.text().then(text => { try { const draft = JSON.parse(text) as DraftState; if (draft.version !== 1 || !draft.packet || typeof draft.packet.referenceNumber !== 'string' || !Array.isArray(draft.rows)) throw new Error('Unsupported draft file. Export the draft using this utility and try again.'); if (!Array.isArray(draft.documents)) draft.documents = []; const invalidRow = draft.rows.find(row => !row.caseId || !row.pan || !row.name || !row.informationDetails || !row.verificationDetails); if (invalidRow) throw new Error('Draft contains an invalid person row.'); draft.draftId = undefined; void this.applyImportedDraft(draft); } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to open the draft file.', 'error'); } });
   }
 
+  async signIn(): Promise<void> {
+    try {
+      this.authLoading.set(true);
+      await this.auth.ensureAuthenticated();
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : 'Unable to start sign-in.', 'error');
+    } finally {
+      this.authLoading.set(false);
+    }
+  }
+
   async createPacket(): Promise<void> {
-    if (this.finalSubmitBusy()) return; this.finalSubmitBusy.set(true); this.progressMessage.set('Submitting packet metadata…');
+    if (this.finalSubmitBusy()) return;
+
+    // Persist the current packet/row-store state before opening the external browser.
+    // Native mode keeps the large dataset in SQLite, so this does not copy millions of rows
+    // into browser memory. Selection state remains in the current UI instance as well.
+    if (!this.auth.authenticated()) {
+      this.authLoading.set(true);
+      try {
+        const saved = await this.saveDraft();
+        if (!saved) return;
+        let authenticated = false;
+        try {
+          authenticated = await this.auth.ensureAuthenticated();
+        } catch (error) {
+          this.toast.show(error instanceof Error ? error.message : 'Authentication failed.', 'error');
+          return;
+        }
+        if (!authenticated) return;
+      } finally {
+        this.authLoading.set(false);
+      }
+    }
+
+    if (this.finalSubmitBusy()) return;
+    this.finalSubmitBusy.set(true); this.progressMessage.set('Submitting packet metadata…');
     try {
       await this.api.submitPacket(this.packet); const documentIndex = this.buildDocumentIndex();
       if (this.nativeMode) { const total = this.nativeTotalRows(); this.progressMessage.set(`Submitting ${total.toLocaleString()} case record(s)…`); for (let startRow = 0; startRow < total; startRow += 100) { const pageNumber = Math.floor(startRow / 100) + 1; const data = await invoke<{ rows: PersonRow[]; totalCount: number }>('get_row_page', { datasetId: this.nativeRowStoreId(), page: pageNumber, pageSize: 100, filter: '' }); await this.runWithConcurrency(data.rows, 4, async row => { await this.api.submitCase(row, this.packet); for (const doc of this.documentsForCase(documentIndex, row.caseId)) { this.progressMessage.set(`Uploading ${doc.fileName} for ${row.name}…`); const file = await this.materializeDocumentFile(doc); await this.api.uploadFile(file, row.caseId, { label: doc.fileName, type: doc.docType, description: doc.description, remarks: '' }); } }); } }
@@ -1425,7 +1465,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private async applyDraft(bundle: LoadedDraftBundle): Promise<void> {
     const draft = bundle.draft; this.restoringDraft = true;
     try {
-      this.packetForm.patchValue(draft.packet); this.documents.set(draft.documents.map(doc => { const stored = bundle.files[doc.id]; const file = stored ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() }) : undefined; return { ...doc, file, filePath: stored ? undefined : doc.filePath, fileSize: doc.fileSize ?? stored?.bytes?.length, fileType: doc.fileType ?? stored?.type, lastModified: doc.lastModified ?? stored?.lastModified }; })); this.currentDraftId.set(draft.draftId ?? null); this.step.set(Math.min(3, Math.max(1, draft.step))); this.packetEditMode.set(false); this.selectedRows.set(new Set()); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(draft.savedAt); this.dirty.set(false); this.nativeStoreDirty.set(false);
+      this.packetForm.patchValue(draft.packet); this.documents.set(draft.documents.map(doc => { const stored = bundle.files[doc.id]; const file = stored ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() }) : undefined; return { ...doc, file, filePath: stored ? undefined : doc.filePath, fileSize: doc.fileSize ?? stored?.bytes?.length, fileType: doc.fileType ?? stored?.type, lastModified: doc.lastModified ?? stored?.lastModified }; })); this.currentDraftId.set(draft.draftId ?? null); this.step.set(Math.min(3, Math.max(1, draft.step))); this.packetEditMode.set(false); this.selectedRows.set(new Set(draft.selectedRowIds ?? [])); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(draft.savedAt); this.dirty.set(false); this.nativeStoreDirty.set(false);
       if (this.nativeMode) { this.nativeRowStoreId.set(draft.rowStoreId ?? draft.draftId ?? null); this.nativeTotalRows.set(draft.rowCount ?? draft.rows.length); await this.refreshNativeRows(); } else { this.rows.set(draft.rows); }
     } finally { this.restoringDraft = false; }
   }

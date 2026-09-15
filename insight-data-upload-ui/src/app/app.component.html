@@ -19,6 +19,12 @@
     <div class="header-links">
       <button type="button" [disabled]="csvImportActive()" (click)="openExisting()">Open <span class="plus">＋</span></button>
       <button type="button" (click)="toast.show('Use the README for setup and backend integration details.', 'info')">Help ⓘ</button>
+      @if (auth.authenticated()) {
+        <span class="auth-user" title="Authenticated user">{{auth.user()?.preferredUsername || auth.user()?.name || 'Signed in'}}</span>
+        <button type="button" (click)="auth.logout()">Sign out</button>
+      } @else {
+        <button type="button" (click)="signIn()">Sign in</button>
+      }
     </div>
   </header>
 
@@ -251,11 +257,11 @@
           <div class="review-card"><span>Documents</span><strong>{{documents().length}}</strong></div>
           <div class="review-card"><span>Backend designation</span><strong>{{environmentLabel}}</strong></div>
         </div>
-        <div class="submit-note"><span>✓</span><div><strong>Ready to submit</strong><p>Packet metadata is sent to <code>/api/v1/packets</code>, cases to <code>/api/v1/cases</code>, and supporting files use the presigned MinIO upload flow.</p></div></div>
+        <div class="submit-note"><span>✓</span><div><strong>Ready to submit</strong><p>Packet metadata and case records are sent through the BFF; supporting files use the presigned upload flow. Direct browser access to the domain service is not used.</p></div></div>
         <div class="progress-box" *ngIf="progressMessage()"><span class="spinner" *ngIf="finalSubmitBusy()"></span>{{progressMessage()}}</div>
         <div class="footer-actions">
           <button class="link-button" type="button" [disabled]="workflowBusy()" (click)="saveDraft()">▣ Save as Draft</button>
-          <div><button class="outline" type="button" [disabled]="workflowBusy()" (click)="back()">Back</button><button class="primary" type="button" [disabled]="finalSubmitBusy()" (click)="createPacket()">{{finalSubmitBusy() ? 'Creating…' : 'Create Packet'}}</button></div>
+          <div><button class="outline" type="button" [disabled]="workflowBusy()" (click)="back()">Back</button><button class="primary" type="button" [disabled]="finalSubmitBusy() || authLoading()" (click)="createPacket()">{{finalSubmitBusy() ? 'Creating…' : authLoading() ? 'Signing in…' : 'Create Packet'}}</button></div>
         </div>
       </section>
     </main>
