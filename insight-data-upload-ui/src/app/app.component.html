@@ -356,7 +356,7 @@
         <input #csvFileInput id="csvFileInput" type="file" accept=".csv,text/csv" class="visually-hidden" (change)="handleCsvSelection($event)" [disabled]="importBusy()">
         <div class="upload-picker" [class.disabled]="importBusy()" role="button" [attr.tabindex]="importBusy() ? -1 : 0" (click)="!importBusy() && browseCsvFile(csvFileInput)" (keydown.enter)="!importBusy() && browseCsvFile(csvFileInput)" (keydown.space)="$event.preventDefault(); !importBusy() && browseCsvFile(csvFileInput)">
           <div class="upload-icon">☁</div>
-          <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
+          <p>Drag &amp; Drop files or <button *ngIf="!nativeMode" type="button" class="browse-link file-browse-control" [disabled]="importBusy()">Browse<input type="file" accept=".csv,text/csv" aria-label="Browse for CSV file" [disabled]="importBusy()" (click)="$event.stopPropagation()" (change)="handleCsvSelection($event)"></button><button *ngIf="nativeMode" type="button" class="browse-link" [disabled]="importBusy()" (click)="$event.stopPropagation(); browseCsvFile(csvFileInput)">Browse</button></p>
           <small>Large CSV files are imported into the desktop row store for memory-safe paging.</small>
         </div>
         <div *ngIf="csvFile()" class="file-pill">
@@ -381,7 +381,7 @@
         <input #docFileInput id="docFileInput" type="file" multiple class="visually-hidden" (change)="handleDocumentSelection($event)">
         <div class="drop-area upload-picker" role="button" tabindex="0" (click)="browseForDocuments(docFileInput)" (keydown.enter)="browseForDocuments(docFileInput)" (keydown.space)="$event.preventDefault(); browseForDocuments(docFileInput)" (dragover)="onDragOver($event)" (drop)="handleDocumentDrop($event)">
           <div class="upload-icon">☁</div>
-          <p>Drag &amp; Drop files or <span class="browse-link">Browse</span></p>
+          <p>Drag &amp; Drop files or <span *ngIf="!nativeMode" class="browse-link file-browse-control">Browse<input type="file" multiple aria-label="Browse for general documents" (click)="$event.stopPropagation()" (change)="handleDocumentSelection($event)"></span><button *ngIf="nativeMode" type="button" class="browse-link" (click)="$event.stopPropagation(); browseForDocuments(docFileInput)">Browse</button></p>
           <small>Maximum allowed file size: 25 MB.</small>
         </div>
         <div *ngIf="generalDocumentFiles().length" class="selected-files-list">
@@ -392,7 +392,7 @@
         </div>
         <div class="attach-choice"><label><input type="radio" [checked]="attachedForAll()" (change)="attachedForAll.set(true)"> All Rows</label><label><input type="radio" [checked]="!attachedForAll()" [disabled]="selectedRows().size === 0" (change)="attachedForAll.set(false)"> Selected Rows ({{selectedRows().size}})</label></div>
         <div class="doc-preview" *ngIf="documents().length">
-          <table><thead><tr><th>Sr. No.</th><th>Document Name</th><th>Document Type</th><th>Description</th><th>Document attached for</th><th></th></tr></thead><tbody><tr *ngFor="let doc of documents(); let i = index"><td>{{i+1}}</td><td class="link-text">{{doc.fileName}}</td><td>{{doc.docType}}</td><td>{{doc.description}}</td><td>{{doc.attachedFor}}</td><td><button type="button" class="icon-btn" (click)="editDocument(doc)">✎</button><button type="button" class="icon-btn danger" (click)="removeDocument(doc.id)">▥</button></td></tr></tbody></table>
+          <table><thead><tr><th>Sr. No.</th><th>Document Name</th><th>Document Type</th><th>Description</th><th>Document attached for</th><th></th></tr></thead><tbody><tr *ngFor="let doc of documents(); let i = index"><td>{{i+1}}</td><td class="link-text">{{doc.fileName}}</td><td>{{doc.docType}}</td><td>{{doc.description}}</td><td>{{documentTargetLabel(doc)}}</td><td><button type="button" class="icon-btn" (click)="editDocument(doc)">✎</button><button type="button" class="icon-btn danger" (click)="removeDocument(doc.id)">▥</button></td></tr></tbody></table>
         </div>
       </div>
       <div class="modal-footer"><button class="outline" type="button" (click)="closeModal()">Cancel</button><button class="primary" type="button" (click)="saveGeneralDocument()">Save</button></div>

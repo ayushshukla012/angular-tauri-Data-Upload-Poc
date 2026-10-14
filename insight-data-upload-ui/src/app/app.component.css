@@ -1039,10 +1039,36 @@ textarea {
 
 .browse-link {
   display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
   font-size: 12px !important;
   color: #2a5eb5 !important;
   text-decoration: underline;
   cursor: pointer
+}
+
+/* Keep the real browser file input directly over Browse so selection is triggered by the user's click. */
+.file-browse-control {
+  position: relative;
+  overflow: hidden;
+}
+.file-browse-control input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.file-browse-control:disabled input[type="file"] {
+  display: none;
+}
+
+.browse-link:disabled {
+  cursor: not-allowed;
+  opacity: .6
 }
 
 .file-pill {

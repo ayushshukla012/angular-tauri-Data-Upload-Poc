@@ -1113,6 +1113,17 @@ export class AppComponent implements OnInit, OnDestroy {
     );
   }
 
+  documentTargetLabel(doc: AttachedDocument): string {
+    if (doc.attachedFor === 'All Rows') return 'All Rows';
+    if (!doc.rowCaseIds.length) return 'No rows selected';
+    const knownRows = new Map(this.rows().map(row => [row.caseId, row]));
+    const labels = doc.rowCaseIds.map(caseId => {
+      const row = knownRows.get(caseId);
+      return row ? `${row.serialNo || row.caseId} — ${row.name || row.pan || row.caseId}` : `Case ID: ${caseId}`;
+    });
+    return labels.join(', ');
+  }
+
   removeDocument(id: string): void { this.documents.update(list => list.filter(doc => doc.id !== id)); this.markDirty(); }
 
   editDocument(doc: AttachedDocument): void {
