@@ -52,6 +52,12 @@ interface CsvImportError {
   message: string;
 }
 
+interface RowValidationIssue {
+  field: string;
+  currentValue: string;
+  message: string;
+}
+
 type ModalName = 'none' | 'addRow' | 'csv' | 'generalDoc' | 'openFile' | 'saveSuccess' | 'closeConfirm';
 type PaginationItem = number | '…';
 
@@ -85,6 +91,7 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly currentRowIndex = signal<number | null>(null);
   readonly currentDraftId = signal<string | null>(null);
   readonly selectedRows = signal<Set<string>>(new Set());
+  readonly selectedValidationCaseId = signal<string | null>(null);
   readonly pageSize = signal(this.appConfig.value.pagination.defaultPageSize);
   readonly page = signal(1);
   readonly filter = signal('');
@@ -205,6 +212,21 @@ export class AppComponent implements OnInit, OnDestroy {
   });
 
   readonly visibleRowCount = computed(() => this.nativeMode ? this.nativeFilteredTotalRows() : this.filteredRows().length);
+
+  /** Validation is derived from the current page so large CSV datasets are not fully revalidated on every render. */
+  readonly validationErrorsByCaseId = computed(() => new Map<string, RowValidationIssue[]>(
+    this.pagedRows().map(row => [row.caseId, this.getValidationIssues(row)] as const)
+  ));
+
+  readonly selectedValidationRow = computed(() => {
+    const caseId = this.selectedValidationCaseId();
+    return caseId ? this.pagedRows().find(row => row.caseId === caseId) ?? null : null;
+  });
+
+  readonly selectedValidationErrors = computed(() => {
+    const row = this.selectedValidationRow();
+    return row ? this.getValidationIssues(row) : [];
+  });
 
   readonly workflowBusy = computed(() => this.csvImportActive() || this.draftSaveBusy() || this.deleteBusy());
   readonly rowMutationBusy = computed(() => this.draftSaveBusy() || this.deleteBusy());
@@ -416,7 +438,7 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.step() === 3) this.step.set(2);
   }
 
-  nextToCreate(): void {
+  async nextToCreate(): Promise<void> {
     if (this.workflowBusy()) return;
     if (!this.packetForm.valid) {
       this.step.set(1);
@@ -428,6 +450,67 @@ export class AppComponent implements OnInit, OnDestroy {
       this.toast.show('Add at least one row or import a CSV before creating the packet.', 'error');
       return;
     }
+
+    let invalidRowCount = 0;
+    let firstInvalidRowIndex = -1;
+    let firstInvalidCaseId: string | null = null;
+
+    try {
+      if (this.nativeMode) {
+        const datasetId = this.nativeRowStoreId();
+        if (!datasetId) throw new Error('Unable to determine the local row store.');
+
+        const pageSize = 1000;
+        let totalCount = 0;
+        for (let page = 1; ; page++) {
+          const result = await invoke<{ rows: PersonRow[]; totalCount: number }>('get_row_page', {
+            datasetId,
+            page,
+            pageSize,
+            filter: ''
+          });
+          totalCount = result.totalCount;
+          result.rows.forEach((row, index) => {
+            if (this.getValidationIssues(row).length) {
+              invalidRowCount++;
+              if (firstInvalidRowIndex < 0) {
+                firstInvalidRowIndex = (page - 1) * pageSize + index;
+                firstInvalidCaseId = row.caseId;
+              }
+            }
+          });
+          if (page * pageSize >= totalCount || result.rows.length === 0) break;
+        }
+      } else {
+        this.rows().forEach((row, index) => {
+          if (this.getValidationIssues(row).length) {
+            invalidRowCount++;
+            if (firstInvalidRowIndex < 0) {
+              firstInvalidRowIndex = index;
+              firstInvalidCaseId = row.caseId;
+            }
+          }
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.toast.show(`Unable to validate all rows: ${message}`, 'error');
+      return;
+    }
+
+    if (invalidRowCount > 0) {
+      this.closeValidationDetails();
+      this.filter.set('');
+      this.page.set(Math.floor(firstInvalidRowIndex / this.pageSize()) + 1);
+      if (this.nativeMode) await this.refreshNativeRows();
+      this.selectedValidationCaseId.set(firstInvalidCaseId);
+      this.toast.show(
+        `${invalidRowCount} row(s) have validation errors. Resolve them before proceeding.`,
+        'error'
+      );
+      return;
+    }
+
     this.step.set(3);
   }
 
@@ -440,14 +523,91 @@ export class AppComponent implements OnInit, OnDestroy {
     this.modal.set('addRow');
   }
 
-  async editRow(index: number): Promise<void> {
+  /** Opens details only from an error badge. Valid rows are deliberately not interactive. */
+  showValidationDetails(row: PersonRow): void {
+    if (!this.getValidationIssues(row).length) return;
+    this.selectedValidationCaseId.set(row.caseId);
+  }
+
+  closeValidationDetails(): void {
+    this.selectedValidationCaseId.set(null);
+  }
+
+  private getValidationIssues(row: PersonRow): RowValidationIssue[] {
+    const issues: RowValidationIssue[] = [];
+    const addRequired = (field: string, value: unknown): void => {
+      const currentValue = String(value ?? '').trim();
+      if (!currentValue) issues.push({ field, currentValue: '—', message: `${field} is required.` });
+    };
+    const addFormat = (field: string, value: unknown, pattern: RegExp, message: string): void => {
+      const currentValue = String(value ?? '').trim();
+      if (currentValue && !pattern.test(currentValue)) issues.push({ field, currentValue, message });
+    };
+
+    const pan = String(row.pan ?? '').trim();
+    addRequired('PAN', pan);
+    addFormat('PAN', pan, /^[A-Z]{5}[0-9]{4}[A-Z]$/i,
+      'PAN must contain 5 letters, 4 digits and 1 final letter (for example, ABCDE1234F).');
+
+    addRequired('Name', row.name);
+    const date = String(row.dobDoi ?? '').trim();
+    addRequired('DOB/DOI', date);
+    if (date && !this.isValidDisplayDate(date)) {
+      issues.push({ field: 'DOB/DOI', currentValue: date, message: 'Enter a valid date in DD/MM/YYYY format.' });
+    }
+
+    const mobile = String(row.mobile ?? '').trim();
+    addRequired('Mobile', mobile);
+    addFormat('Mobile', mobile, /^\d{10}$/,
+      'Mobile number must contain exactly 10 digits.');
+
+    const email = String(row.email ?? '').trim();
+    addRequired('E-Mail', email);
+    addFormat('E-Mail', email, /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+      'Enter a valid email address.');
+
+    const pinCode = String(row.pinCode ?? '').trim();
+    addRequired('PIN Code', pinCode);
+    addFormat('PIN Code', pinCode, /^\d{6}$/,
+      'PIN Code must contain exactly 6 digits.');
+
+    addRequired('Address', row.address);
+    addRequired('State', row.state);
+
+    // These fields are marked mandatory in the existing Add/Edit Row form.
+    const info = row.informationDetails;
+    addRequired('FY', info?.informationFy);
+    addRequired('Information Type', info?.informationType);
+    addRequired('Findings', info?.finding);
+    addRequired('Source', info?.source);
+    addRequired('Information Value', info?.informationValue);
+
+    const verification = row.verificationDetails;
+    addRequired('Actionable AY', verification?.actionableAy);
+    addRequired('Verification Result Type', verification?.verificationResultType);
+    addRequired('Statutory Reason', verification?.statutoryReason);
+    addRequired('Income Escaping Assessment Value', verification?.incomeEscapingAssessmentValue);
+    addRequired('Verification Information Value', verification?.informationValue);
+
+    return issues;
+  }
+
+  private isValidDisplayDate(value: string): boolean {
+    const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value);
+    if (!match) return false;
+    const day = Number(match[1]);
+    const month = Number(match[2]);
+    const year = Number(match[3]);
+    const parsed = new Date(year, month - 1, day);
+    return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day;
+  }
+
+  async editRow(row: PersonRow): Promise<void> {
     if (this.draftSaveBusy() || this.deleteBusy()) return;
-    // Rows already present in the Angular page are immediately editable even while
-    // the background CSV importer is still filling the remaining dataset. Do not
-    // re-query SQLite here: that extra round-trip can contend with the importer and
-    // is unnecessary because the table row already contains the values to edit.
-    const row = this.rows()[index];
-    if (!row) return;
+    // Find the row by stable identity. A visible row index is only page-relative;
+    // looking it up by caseId avoids editing the wrong record on later pages/filters.
+    const index = this.rows().findIndex(item => item.caseId === row.caseId);
+    if (index < 0) return;
     if (row.verificationStatus === 'Completed') {
       this.toast.show('Completed rows are locked and cannot be edited.', 'info');
       return;
@@ -501,7 +661,10 @@ export class AppComponent implements OnInit, OnDestroy {
         if (existingIndex === null) this.nativeTotalRows.update(value => value + 1);
         this.markDirty(); await this.refreshNativeRows();
       } else {
-        this.rows.update(current => { const next = [...current]; if (existingIndex === null) next.push(row); else next[existingIndex] = row; return next; }); this.markDirty(); this.page.set(this.pageCount());
+        this.rows.update(current => { const next = [...current]; if (existingIndex === null) next.push(row); else next[existingIndex] = row; return next; }); this.markDirty(); if (existingIndex === null) this.page.set(this.pageCount());
+      }
+      if (existing && this.selectedValidationCaseId() === existing.caseId && this.getValidationIssues(row).length === 0) {
+        this.selectedValidationCaseId.set(null);
       }
       this.closeModal(); this.toast.show(existingIndex === null ? 'Row saved successfully.' : 'Row updated successfully.', 'success');
     } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to save the row.', 'error'); }
@@ -639,7 +802,7 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
 
-  setFilter(value: string): void { if (this.csvImportActive()) return; this.filter.set(value); this.page.set(1); if (this.nativeMode) void this.refreshNativeRows(); }
+  setFilter(value: string): void { if (this.csvImportActive()) return; this.closeValidationDetails(); this.filter.set(value); this.page.set(1); if (this.nativeMode) void this.refreshNativeRows(); }
 
  setPage(value: number | '…'): void {
     if (value === '…') {
@@ -655,6 +818,7 @@ export class AppComponent implements OnInit, OnDestroy {
       return;
     }
 
+    this.closeValidationDetails();
     this.page.set(targetPage);
 
     if (this.nativeMode) {
@@ -1476,7 +1640,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private async applyDraft(bundle: LoadedDraftBundle): Promise<void> {
     const draft = bundle.draft; this.restoringDraft = true;
     try {
-      this.packetForm.patchValue(draft.packet); this.documents.set(draft.documents.map(doc => { const stored = bundle.files[doc.id]; const file = stored ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() }) : undefined; return { ...doc, file, filePath: stored ? undefined : doc.filePath, fileSize: doc.fileSize ?? stored?.bytes?.length, fileType: doc.fileType ?? stored?.type, lastModified: doc.lastModified ?? stored?.lastModified }; })); this.currentDraftId.set(draft.draftId ?? null); this.step.set(Math.min(3, Math.max(1, draft.step))); this.packetEditMode.set(false); this.selectedRows.set(new Set(draft.selectedRowIds ?? [])); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(draft.savedAt); this.dirty.set(false); this.nativeStoreDirty.set(false);
+      this.selectedValidationCaseId.set(null); this.packetForm.patchValue(draft.packet); this.documents.set(draft.documents.map(doc => { const stored = bundle.files[doc.id]; const file = stored ? new File([new Uint8Array(stored.bytes)], stored.name, { type: stored.type, lastModified: stored.lastModified || Date.now() }) : undefined; return { ...doc, file, filePath: stored ? undefined : doc.filePath, fileSize: doc.fileSize ?? stored?.bytes?.length, fileType: doc.fileType ?? stored?.type, lastModified: doc.lastModified ?? stored?.lastModified }; })); this.currentDraftId.set(draft.draftId ?? null); this.step.set(Math.min(3, Math.max(1, draft.step))); this.packetEditMode.set(false); this.selectedRows.set(new Set(draft.selectedRowIds ?? [])); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(draft.savedAt); this.dirty.set(false); this.nativeStoreDirty.set(false);
       if (this.nativeMode) { this.nativeRowStoreId.set(draft.rowStoreId ?? draft.draftId ?? null); this.nativeTotalRows.set(draft.rowCount ?? draft.rows.length); await this.refreshNativeRows(); } else { this.rows.set(draft.rows); }
     } finally { this.restoringDraft = false; }
   }
@@ -1485,7 +1649,7 @@ export class AppComponent implements OnInit, OnDestroy {
     try { if (this.nativeMode) { const datasetId = `rows-${crypto.randomUUID()}`; this.nativeRowStoreId.set(datasetId); await invoke('seed_row_store', { datasetId, rows: draft.rows.map(row => this.toNativeRowInput(row)) }); this.nativeTotalRows.set(draft.rows.length); draft.rowStoreId = datasetId; draft.rowCount = draft.rows.length; } await this.applyDraft({ draft, files: {} }); this.modal.set('none'); this.markDirty(); const localDocuments = draft.documents.filter(doc => !!doc.filePath).length; const missingDocuments = draft.documents.length - localDocuments; if (missingDocuments > 0) this.toast.show(`Draft imported with ${missingDocuments} document reference(s). Re-select any missing local files before final submission.`, 'info'); else this.toast.show('Existing draft file opened.', 'success'); } catch (error) { this.toast.show(error instanceof Error ? error.message : 'Unable to open the draft file.', 'error'); }
   }
 
-  private resetApplication(): void { this.packetForm.reset(); this.rows.set([]); this.documents.set([]); this.selectedRows.set(new Set()); this.currentRowIndex.set(null); this.currentDraftId.set(null); this.nativeRowStoreId.set(null); this.nativeTotalRows.set(0); this.nativeFilteredTotalRows.set(0); this.nativeStoreDirty.set(false); this.dirty.set(false); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(null); this.progressMessage.set(''); this.packetEditMode.set(true); this.modal.set('none'); }
+  private resetApplication(): void { this.packetForm.reset(); this.rows.set([]); this.documents.set([]); this.selectedRows.set(new Set()); this.selectedValidationCaseId.set(null); this.currentRowIndex.set(null); this.currentDraftId.set(null); this.nativeRowStoreId.set(null); this.nativeTotalRows.set(0); this.nativeFilteredTotalRows.set(0); this.nativeStoreDirty.set(false); this.dirty.set(false); this.page.set(1); this.filter.set(''); this.lastSavedAt.set(null); this.progressMessage.set(''); this.packetEditMode.set(true); this.modal.set('none'); }
 
   private markDirty(): void { if (this.restoringDraft) return; this.dirty.set(true); if (this.nativeMode) this.nativeStoreDirty.set(true); }
 

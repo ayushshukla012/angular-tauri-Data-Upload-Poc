@@ -147,13 +147,25 @@
             <thead>
               <tr>
                 <th class="check-col"><input type="checkbox" [disabled]="rowMutationBusy()" [checked]="allVisibleSelected()" (change)="toggleAllVisible($any($event.target).checked)"></th>
-                <th>Sr.<br>No. </th><th>PAN </th><th>Name </th><th>DOB/DOI </th><th>Address </th><th>State </th><th>Pin<br>Code </th><th>E-Mail </th><th>Docs </th><th>Verification<br>Status </th><th class="action-col"></th>
+                <th>Sr.<br>No. </th><th>PAN </th><th>Name </th><th>DOB/DOI </th><th>Address </th><th>State </th><th>Pin<br>Code </th><th>E-Mail </th><th>Docs </th><th>Validation</th><th>Verification<br>Status </th><th class="action-col"></th>
               </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of pagedRows(); let rowIndex = index; trackBy: trackByCaseId">
+              <tr *ngFor="let row of pagedRows(); trackBy: trackByCaseId">
                 <td><input type="checkbox" [disabled]="csvImportActive() || row.verificationStatus === 'Completed'" [checked]="selectedRows().has(row.caseId)" (change)="toggleRow(row, $any($event.target).checked)"></td>
                 <td>{{row.serialNo}}</td><td class="mono">{{row.pan}}</td><td>{{row.name}}</td><td>{{row.dobDoi}}</td><td>{{row.address}}</td><td>{{row.state}}</td><td>{{row.pinCode}}</td><td class="truncate" [title]="row.email">{{row.email}}</td><td>{{documentCountByCaseId().get(row.caseId) || 0}}</td>
+                <td class="validation-cell">
+                  <ng-container *ngIf="validationErrorsByCaseId().get(row.caseId) as rowIssues">
+                    <button *ngIf="rowIssues.length > 0; else validRowBadge"
+                            type="button"
+                            class="validation-badge error"
+                            [attr.aria-label]="rowIssues.length + (rowIssues.length === 1 ? ' validation error' : ' validation errors') + ' for row ' + row.serialNo"
+                            (click)="showValidationDetails(row)">
+                      <span aria-hidden="true">!</span>{{rowIssues.length}} {{rowIssues.length === 1 ? 'error' : 'errors'}}
+                    </button>
+                    <ng-template #validRowBadge><span class="validation-badge valid"><span aria-hidden="true">✓</span>Valid</span></ng-template>
+                  </ng-container>
+                </td>
                 <td>
                   <select *ngIf="row.verificationStatus !== 'Completed'; else completedStatus"
                           class="status-select"
@@ -166,10 +178,10 @@
                   <ng-template #completedStatus><span class="status-select completed-status">Completed</span></ng-template>
                 </td>
                 <td class="row-actions">
-                  <button class="icon-btn" type="button" [disabled]="row.verificationStatus === 'Completed' || rowMutationBusy()" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(rowIndex)">✎</button>
+                  <button class="icon-btn" type="button" [disabled]="row.verificationStatus === 'Completed' || rowMutationBusy()" [attr.aria-label]="'Edit row ' + row.serialNo" (click)="editRow(row)">✎</button>
                 </td>
               </tr>
-              <tr *ngIf="pagedRows().length === 0"><td colspan="12" class="empty">No records found. Add a row or import a CSV.</td></tr>
+              <tr *ngIf="pagedRows().length === 0"><td colspan="13" class="empty">No records found. Add a row or import a CSV.</td></tr>
             </tbody>
           </table>
         </div>
@@ -178,6 +190,30 @@
           <div><strong>General documents</strong><span>{{documents().length}} attached document(s)</span></div>
           <button class="link-button" type="button" [disabled]="workflowBusy() || selectedRows().size === 0 || hasCompletedSelection()" (click)="openGeneralDocument()">Manage documents</button>
         </div>
+
+        <section class="validation-details-panel" *ngIf="selectedValidationRow() as validationRow" aria-live="polite">
+          <div class="validation-details-heading">
+            <div class="validation-details-title">
+              <span class="validation-title-icon" aria-hidden="true">!</span>
+              <div>
+                <strong>Validation details</strong>
+                <span>Row {{validationRow.serialNo}} / {{validationRow.pan || 'PAN not provided'}}<ng-container *ngIf="validationRow.name"> ({{validationRow.name}})</ng-container></span>
+              </div>
+            </div>
+            <button class="validation-close" type="button" aria-label="Close validation details" (click)="closeValidationDetails()">×</button>
+          </div>
+          <p class="validation-details-note">Review the issues below and update the row using its Edit control. This panel is read-only.</p>
+          <div class="validation-issues-table-wrap">
+            <table class="validation-issues-table">
+              <thead><tr><th>Sr. No.</th><th>Field</th><th>Current Value</th><th>Error Message</th></tr></thead>
+              <tbody>
+                <tr *ngFor="let issue of selectedValidationErrors(); let issueIndex = index">
+                  <td>{{issueIndex + 1}}</td><td>{{issue.field}}</td><td>{{issue.currentValue}}</td><td>{{issue.message}}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         <div class="pagination">
 
